@@ -111,6 +111,35 @@ impl Session {
         Ok(text)
     }
 
+    /// Only use the system trash; never fall back to permanent deletion.
+    pub fn delete_file(&self, relative: &str) -> Result<Option<String>, String> {
+        self.delete_file_with(relative, |path| {
+            trash::delete(path).map_err(|e| e.to_string())
+        })
+    }
+
+    fn delete_file_with(
+        &self,
+        relative: &str,
+        remove: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<Option<String>, String> {
+        let workspace = self.workspace()?;
+        let path = workspace.deletable_path(relative)?;
+        remove(&path)?;
+        // Deleting the remembered note should restore its folder next time, not a missing file.
+        let repair = || -> Result<(), String> {
+            if self.load_config()?.last_opened == Some(OpenTarget::File(path)) {
+                self.remember(OpenTarget::Folder(workspace.root.clone()))?;
+            }
+            Ok(())
+        };
+        Ok(repair().err().map(|error| {
+            format!(
+                "File moved to Trash, but the last-opened setting could not be updated: {error}"
+            )
+        }))
+    }
+
     fn load_config(&self) -> Result<Config, String> {
         match fs::read(&self.config_path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -143,6 +172,16 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Uses the desktop OS Trash; run explicitly on a desktop session."]
+    fn recycles_own_temporary_note() {
+        let (home, _, note) = sample();
+        let mut session = Session::for_home(home.path());
+        session.open_path(&note).unwrap();
+        assert!(session.delete_file("Café walk.md").unwrap().is_none());
+        assert!(!note.exists());
+        assert!(session.startup(&[]).unwrap().unwrap().file.is_none());
+    }
     fn sample() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let folder = temp.path().join("Field notes");
@@ -252,5 +291,44 @@ mod tests {
         assert!(session.startup(&[]).is_err());
         assert!(session.startup(&[folder.into_os_string()]).is_ok());
         assert!(session.startup(&[]).is_ok());
+    }
+
+    #[test]
+    fn deleting_last_opened_note_remembers_parent_and_never_deletes_folders_or_outside_files() {
+        let (home, folder, note) = sample();
+        let mut session = Session::for_home(home.path());
+        session.open_path(&note).unwrap();
+        session
+            .delete_file_with("Café walk.md", |path| {
+                fs::remove_file(path).map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert!(!note.exists());
+        assert!(session.startup(&[]).unwrap().unwrap().file.is_none());
+        assert_eq!(
+            session.workspace().unwrap().root,
+            fs::canonicalize(folder).unwrap()
+        );
+        assert!(session
+            .delete_file_with(".", |_| panic!("Must not delete a folder"))
+            .is_err());
+        assert!(session
+            .delete_file_with("../outside.md", |_| panic!(
+                "Must not delete outside the workspace"
+            ))
+            .is_err());
+    }
+
+    #[test]
+    fn failed_trash_operation_preserves_the_file_and_config() {
+        let (home, _, note) = sample();
+        let mut session = Session::for_home(home.path());
+        session.open_path(&note).unwrap();
+        let config = fs::read(&session.config_path).unwrap();
+        assert!(session
+            .delete_file_with("Café walk.md", |_| Err("Trash unavailable".into()))
+            .is_err());
+        assert!(note.exists());
+        assert_eq!(fs::read(&session.config_path).unwrap(), config);
     }
 }

@@ -1,4 +1,5 @@
 //! Filesystem operations independent of the desktop shell.
+pub mod metadata;
 pub mod session;
 use serde::Serialize;
 use std::{
@@ -16,6 +17,8 @@ pub struct Entry {
     pub path: String,
     pub name: String,
     pub kind: &'static str,
+    pub tags: Vec<String>,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +66,11 @@ impl Workspace {
             } else {
                 continue;
             };
+            let metadata = if kind == "note" {
+                metadata::read_metadata(item.path())
+            } else {
+                Default::default()
+            };
             entries.push(Entry {
                 path: item
                     .path()
@@ -72,6 +80,12 @@ impl Workspace {
                     .replace('\\', "/"),
                 name: item.file_name().to_string_lossy().into_owned(),
                 kind,
+                title: metadata
+                    .properties
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                tags: metadata.tags,
             });
             if entries.len() > 50_000 {
                 return Err(
@@ -107,6 +121,21 @@ impl Workspace {
         let path = fs::canonicalize(self.root.join(relative)).map_err(|e| e.to_string())?;
         if !path.starts_with(&self.root) || !path.is_file() {
             return Err("The file must be inside the open folder.".into());
+        }
+        Ok(path)
+    }
+
+    fn deletable_path(&self, relative: &str) -> Result<PathBuf, String> {
+        let path = self.resolve(relative)?;
+        if fs::symlink_metadata(self.root.join(relative))
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("Symbolic links cannot be deleted from Files.".into());
+        }
+        if !is_markdown(&path) && image_mime(&path).is_none() {
+            return Err("Only Markdown files and supported images can be moved to Trash.".into());
         }
         Ok(path)
     }
@@ -199,6 +228,26 @@ fn image_mime(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn indexes_frontmatter_tags_and_tolerates_malformed_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("nostr.md"),
+            "---\ntitle: Get on Nostr\ntags: [idea, nostr, web]\n---\nBody",
+        )
+        .unwrap();
+        fs::write(dir.path().join("broken.md"), "---\ntags: [bad\n---\nBody").unwrap();
+        let entries = Workspace::open(dir.path()).unwrap().list().unwrap().entries;
+        let note = entries.iter().find(|e| e.name == "nostr.md").unwrap();
+        assert_eq!(note.title.as_deref(), Some("Get on Nostr"));
+        assert_eq!(note.tags, ["idea", "nostr", "web"]);
+        assert!(entries
+            .iter()
+            .find(|e| e.name == "broken.md")
+            .unwrap()
+            .tags
+            .is_empty());
+    }
     #[test]
     fn lists_notes_images_and_folders_without_tool_directories() {
         let dir = tempfile::tempdir().unwrap();

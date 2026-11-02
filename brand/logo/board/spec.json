@@ -1,0 +1,28 @@
+{
+  "brand": "Longview",
+  "tagline": "A quiet desktop for a folder of Markdown",
+  "brief": "A fast, minimal Markdown reader that feels like a cabin with good light. The mark should be calm and warm, and it should carry a Punk Science wink: irreverent, ironic, never loud.",
+  "adjectives": ["cozy", "fast", "minimal", "elegant", "wry"],
+  "criteria": "Success: one idea in one sentence, sharp at 16 px, works in one colour, sits beside the app's warm paper and olive palette.",
+  "industry": "software",
+  "nav": ["Download", "Docs", "lv command"],
+  "brand_color": "#465032",
+  "greyscale": false,
+  "designer": "Punk Science Studios",
+  "round": 2,
+  "concepts": [
+    {
+      "name": "Horizon Rule",
+      "symbol": "../source/longview-symbol.svg",
+      "lockup": "../source/longview-horizontal.svg",
+      "idea": "The sun setting over a ---. Markdown's least exciting element, promoted to landscape.",
+      "rationale": [
+        "The horizontal rule finally lives up to its name",
+        "Rule sits on the wordmark baseline; sun meets the ascender",
+        "Pixel-snapped small cut keeps the joke at 16 px"
+      ]
+    }
+  ],
+  "recommendation": "Horizon Rule in olive on paper as the primary; paper on olive for the app icon.",
+  "next_steps": ["Swap the Tauri app icons for the new set", "Add favicon.svg to the docs site", "Professional trademark search before launch"]
+}

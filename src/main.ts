@@ -7,14 +7,20 @@ import { markdown } from '@codemirror/lang-markdown';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { localTarget, headingId } from './paths';
+import { fileMatches } from './filter';
 import './style.css';
 
-interface Entry { path: string; name: string; kind: 'folder' | 'note' | 'image' }
+interface Entry { path: string; name: string; kind: 'folder' | 'note' | 'image'; tags: string[]; title: string | null }
+interface NoteMetadata { properties: Record<string, unknown>; tags: string[]; error: string | null }
+interface ParsedNote { body: string; metadata: NoteMetadata }
 interface Folder { name: string; entries: Entry[] }
 interface Opened { folder: Folder; file: string | null }
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 let folder: Folder | null = null, path = '', original = '', text = '', editMode = false;
 let folderMode = false;
+let activeTag = '';
+let contextEntry: Entry | null = null, deletingEntry: Entry | null = null;
+const trashName = navigator.platform.startsWith('Win') ? 'Recycle Bin' : 'Trash';
 let busy = false, saving = false, generation = 0, editTimer: ReturnType<typeof setTimeout>;
 const editorStates = new Map<string, EditorState>();
 const closedFolders = new Set<string>();
@@ -82,6 +88,7 @@ async function applyOpened(opened: Opened) {
   folder = opened.folder; folderMode = opened.file === null;
   path = ''; text = original = ''; generation++; editorStates.clear(); closedFolders.clear(); clearNotice();
   el<HTMLInputElement>('filter').value = '';
+  activeTag = ''; document.querySelector('.workspace')!.classList.remove('tag-filtering');
   document.querySelector('.workspace')!.classList.toggle('folder-mode', folderMode);
   el('workspace-name').textContent = folder.name; el('tree-heading').textContent = folder.name.toUpperCase();
   el('breadcrumbs').textContent = folder.name;
@@ -118,7 +125,7 @@ async function loadNote(next: string, hash = '', remember = true) {
     text = editor.state.sliceDoc(); clearNotice();
     el('breadcrumbs').textContent = `${folder?.name} / ${path.split('/').join(' / ')}`;
     el('empty').hidden = true; setMode(editMode); updateStatus(); renderTree();
-    if (!folderMode) togglePane('files-pane', 'files', false);
+    if (!folderMode && !activeTag) togglePane('files-pane', 'files', false);
     await renderNote();
     if (hash) jumpToHeading(hash); else el('preview').scrollTop = 0;
   } catch (e) { notice(e); }
@@ -146,39 +153,96 @@ function makeFile(entry: Entry, includePath = false) {
   button.append(icon, label); button.title = entry.path;
   if (entry.path === path) button.setAttribute('aria-current', 'page');
   button.onclick = () => { el<HTMLDialogElement>('finder').close(); if (entry.kind === 'note') navigate(entry.path); else void inspectImage(entry.path, entry.name); };
+  if(!includePath) {
+    button.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, button, event.clientX, event.clientY); };
+    button.onkeydown = event => {
+      if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, button); }
+    };
+  }
   return button;
+}
+function tagButton(tag: string, label = `#${tag}`) {
+  const button = document.createElement('button'); button.className = 'tag'; button.textContent = label;
+  button.setAttribute('aria-label', `Filter files by tag ${tag}`); button.onclick = () => selectTag(tag);
+  return button;
+}
+function selectTag(tag: string) {
+  activeTag = tag; document.querySelector('.workspace')!.classList.toggle('tag-filtering', !!tag);
+  togglePane('files-pane', 'files', true); renderTree();
+}
+function renderTagIndex() {
+  const active = el('active-tag'); active.hidden = !activeTag; active.replaceChildren();
+  if(activeTag) { const clear = document.createElement('button'); clear.className = 'tag selected'; clear.textContent = `#${activeTag} ×`; clear.setAttribute('aria-label', `Clear tag filter ${activeTag}`); clear.onclick = () => selectTag(''); active.append(clear); }
+  const counts = new Map<string, number>();
+  for(const entry of folder?.entries || []) {
+    if(entry.kind !== 'note') continue;
+    const parents = new Set<string>();
+    for(const tag of entry.tags) { const parts = tag.split('/'); for(let i = 1; i <= parts.length; i++) parents.add(parts.slice(0,i).join('/')); }
+    for(const tag of parents) counts.set(tag,(counts.get(tag) || 0) + 1);
+  }
+  const catalog = el('tags-catalog'); catalog.replaceChildren();
+  for(const tag of [...counts.keys()].sort()) {
+    catalog.append(tagButton(tag,`#${tag} · ${counts.get(tag)}`));
+  }
+  el('tags-index').hidden = counts.size === 0;
 }
 function renderTree() {
   const tree = el('tree'); tree.replaceChildren(); if (!folder) return;
+  renderTagIndex();
   const q = el<HTMLInputElement>('filter').value.trim().toLowerCase();
-  const leaves = folder.entries.filter(e => e.kind !== 'folder' && (!q || e.path.toLowerCase().includes(q)));
+  const leaves = folder.entries.filter(e => e.kind !== 'folder' && fileMatches(e,q,activeTag));
+  const visiblePaths = new Set(leaves.map(e => e.path));
   const needed = new Set<string>();
   for (const entry of leaves) { const parts = entry.path.split('/'); parts.pop(); while(parts.length) { needed.add(parts.join('/')); parts.pop(); } }
+  const children = new Map<string, Entry[]>();
+  for(const entry of folder.entries) {
+    if(entry.kind === 'folder' ? !needed.has(entry.path) : !visiblePaths.has(entry.path)) continue;
+    const parent = entry.path.split('/').slice(0,-1).join('/');
+    const siblings = children.get(parent) || []; siblings.push(entry); children.set(parent,siblings);
+  }
   function branch(parent: string, container: HTMLElement) {
-    const entries = folder!.entries.filter(e => e.path.split('/').slice(0,-1).join('/') === parent && (e.kind === 'folder' ? needed.has(e.path) : leaves.includes(e)));
+    const entries = children.get(parent) || [];
     entries.sort((a,b) => Number(b.kind === 'folder') - Number(a.kind === 'folder') || a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.kind !== 'folder') { container.append(makeFile(entry)); continue; }
-      const details = document.createElement('details'); details.open = q !== '' || !closedFolders.has(entry.path);
+      const details = document.createElement('details'); details.open = q !== '' || !!activeTag || !closedFolders.has(entry.path);
       const summary = document.createElement('summary'); summary.textContent = entry.name; details.append(summary);
       details.ontoggle = () => { if (details.open) closedFolders.delete(entry.path); else closedFolders.add(entry.path); };
       branch(entry.path, details); container.append(details);
     }
   }
   branch('', tree);
-  if (!leaves.length) tree.textContent = q ? 'No matching files.' : 'No notes or images in this folder.';
-  el('file-count').textContent = `${folder.entries.filter(e => e.kind === 'note').length} notes`;
+  if (!leaves.length) tree.textContent = q || activeTag ? 'No matching files. Clear the tag or text filter to see more.' : 'No notes or images in this folder.';
+  const total = folder.entries.filter(e => e.kind === 'note').length, shown = leaves.filter(e => e.kind === 'note').length;
+  el('file-count').textContent = q || activeTag ? `${shown} of ${total} notes` : `${total} notes`;
 }
 
 async function renderNote() {
   const preview = el('preview');
   if (!path) { preview.hidden = true; el('editor').hidden = true; return; }
   const activePath = path, activeText = text;
+  const parsed = await invoke<ParsedNote>('parse_note', {text: activeText}).catch(error => { notice(error); return null; });
+  if (!parsed || path !== activePath || text !== activeText) return;
+  const entry = folder?.entries.find(e => e.path === path);
+  const title = typeof parsed.metadata.properties.title === 'string' ? parsed.metadata.properties.title : null;
+  if(entry && (JSON.stringify(entry.tags) !== JSON.stringify(parsed.metadata.tags) || entry.title !== title)) {
+    entry.tags = parsed.metadata.tags; entry.title = title; renderTree();
+  }
   // Strip document-controlled style, scripts, frames, forms, IDs, and local file URLs.
-  preview.innerHTML = DOMPurify.sanitize(marked.parse(text, { async: false }), {
+  preview.innerHTML = DOMPurify.sanitize(marked.parse(parsed.body, { async: false }), {
     FORBID_TAGS: ['style', 'script', 'iframe', 'form', 'input', 'button', 'textarea', 'video', 'audio'],
     FORBID_ATTR: ['style', 'id', 'name', 'srcset', 'target'],
   });
+  if(title && !preview.querySelector('h1')) { const heading = document.createElement('h1'); heading.textContent = title; preview.prepend(heading); }
+  const properties = document.createElement('div'); properties.className = 'note-properties';
+  for(const key of ['date','status']) {
+    const value = parsed.metadata.properties[key];
+    if(typeof value === 'string' || typeof value === 'number') { const item = document.createElement('span'); item.textContent = `${key}: ${value}`; properties.append(item); }
+  }
+  const tags = document.createElement('div'); tags.className = 'note-tags'; parsed.metadata.tags.forEach(tag => tags.append(tagButton(tag))); properties.append(tags);
+  if(properties.textContent) { const h1 = preview.querySelector('h1'); if(h1)h1.after(properties); else preview.prepend(properties); }
+  if(parsed.metadata.error) { const error = document.createElement('p'); error.className = 'metadata-error'; error.textContent = parsed.metadata.error; preview.prepend(error); }
+  el('words').textContent = `${parsed.body.trim().split(/\s+/).filter(Boolean).length} words`;
   const headingCounts = new Map<string, number>();
   preview.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(h => {
     const base = headingId(h.textContent || ''), count = headingCounts.get(base) || 0;
@@ -199,7 +263,7 @@ async function renderNote() {
     };
   }
   const images = [...preview.querySelectorAll<HTMLImageElement>('img')];
-  renderDetails(links, images);
+  renderDetails(links, images, parsed.metadata);
   await Promise.all(images.map(async image => {
     const src = image.getAttribute('src') || '';
     if (/^https:/i.test(src)) { image.referrerPolicy = 'no-referrer'; return; }
@@ -215,13 +279,16 @@ async function renderNote() {
     } catch { image.alt = `${image.alt || 'Image'} — unavailable: ${target.path}`; }
   }));
 }
-function renderDetails(links: HTMLAnchorElement[], images: HTMLImageElement[]) {
+function renderDetails(links: HTMLAnchorElement[], images: HTMLImageElement[], metadata: NoteMetadata) {
   const box = el('details-content'); box.replaceChildren();
   const section = (label: string, lines: string[]) => {
     const h = document.createElement('h3'); h.textContent = label; box.append(h);
     for(const line of lines.length ? lines : ['None on this page.']) { const p = document.createElement('p'); p.textContent = line; box.append(p); }
   };
   section('FILE', [path]);
+  section('PROPERTIES', Object.entries(metadata.properties).filter(([key]) => key !== 'tags').map(([key,value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`));
+  if(metadata.tags.length) { const h = document.createElement('h3'); h.textContent = 'TAGS'; box.append(h); metadata.tags.forEach(tag => box.append(tagButton(tag))); }
+  if(metadata.error) section('FRONTMATTER ERROR', [metadata.error]);
   section(`IMAGES · ${images.length}`, images.map(img => `${img.alt || 'No description'}\n${img.getAttribute('src') || ''}`));
   section(`LINKS · ${links.length}`, links.map(a => `${a.textContent}\n${a.getAttribute('href')}`));
   const hint = document.createElement('p'); hint.textContent = 'Use Edit to change image descriptions and link destinations.'; hint.className = 'detail-hint'; box.append(hint);
@@ -237,11 +304,51 @@ async function inspectImage(imagePath: string, description: string) {
 function findFiles() {
   const box = el('find-results'); box.replaceChildren();
   const q = el<HTMLInputElement>('find-input').value.toLowerCase();
-  const matches = folder?.entries.filter(e => e.kind === 'note' && e.path.toLowerCase().includes(q)).slice(0,100) || [];
+  const matches = folder?.entries.filter(e => e.kind === 'note' && fileMatches(e,q,activeTag)).slice(0,100) || [];
   matches.forEach(e => box.append(makeFile(e, true)));
   if (!matches.length) box.textContent = folder ? 'No matching notes.' : 'Open a folder to find your notes.';
 }
 function openFinder() { findFiles(); el<HTMLDialogElement>('finder').showModal(); el<HTMLInputElement>('find-input').focus(); }
+
+function closeFileMenu() { el('file-context').hidden = true; contextEntry = null; }
+function openFileMenu(entry: Entry, anchor: HTMLElement, x = 0, y = 0) {
+  if(busy || saving) return;
+  contextEntry = entry; const menu = el('file-context'), bounds = anchor.getBoundingClientRect();
+  menu.hidden = false;
+  menu.style.left = `${Math.max(8,Math.min(x || bounds.left,window.innerWidth - 175))}px`;
+  menu.style.top = `${Math.max(8,Math.min(y || bounds.bottom,window.innerHeight - 52))}px`;
+  el('delete-file').focus();
+}
+function requestDelete() {
+  const entry = contextEntry; closeFileMenu(); if(!entry || busy || saving) return;
+  deletingEntry = entry;
+  el('delete-title').textContent = `Move file to ${trashName}?`;
+  el('delete-description').textContent = `${entry.path}\n\nYou can restore it from the ${trashName}.` + (entry.path === path && dirty() ? '\nUnsaved changes in this note will be discarded.' : '');
+  el('confirm-delete').textContent = `Move to ${trashName}`;
+  el<HTMLDialogElement>('delete-dialog').showModal(); el('cancel-delete').focus();
+}
+async function deleteSelectedFile() {
+  const entry = deletingEntry; if(!entry || busy || saving) return;
+  busy = true; el<HTMLButtonElement>('confirm-delete').disabled = true;
+  try {
+    const warning = await invoke<string | null>('delete_file', {path: entry.path});
+    generation++; editorStates.delete(entry.path);
+    if(folder) folder.entries = folder.entries.filter(item => item.path !== entry.path);
+    if(entry.path === path) {
+      clearTimeout(editTimer);
+      path = ''; text = original = ''; editor.setState(noteState(''));
+      el('preview').replaceChildren(); el('details-content').replaceChildren(); el('preview').hidden = el('editor').hidden = true;
+      el('empty').hidden = false; el('empty').querySelector('h1')!.textContent = 'File moved to ' + trashName + '.';
+      el('empty').querySelector('p:not(.eyebrow)')!.textContent = 'Choose another note from Files.';
+      el('breadcrumbs').textContent = folder?.name || 'Your field notes';
+      togglePane('files-pane','files',true); updateStatus();
+    }
+    renderTree(); el<HTMLDialogElement>('delete-dialog').close(); deletingEntry = null;
+    el('status').textContent = `Moved ${entry.name} to ${trashName}`;
+    clearNotice(); if(warning) notice(warning);
+  } catch(error) { notice(error); el<HTMLDialogElement>('delete-dialog').close(); }
+  finally { busy = false; el<HTMLButtonElement>('confirm-delete').disabled = false; }
+}
 
 el('open-folder').onclick = el('empty-open').onclick = () => { void chooseTarget('folder'); };
 el('open-file').onclick = () => { void chooseTarget('file'); };
@@ -255,6 +362,11 @@ el('find').onclick = openFinder; el('find-input').oninput = findFiles;
 el('close-finder').onclick = () => el<HTMLDialogElement>('finder').close();
 el('close-image').onclick = () => el<HTMLDialogElement>('image-dialog').close();
 el('dismiss-notice').onclick = clearNotice;
+el('delete-file').onclick = requestDelete;
+el('confirm-delete').onclick = () => { void deleteSelectedFile(); };
+el('cancel-delete').onclick = () => { deletingEntry = null; el<HTMLDialogElement>('delete-dialog').close(); };
+el<HTMLDialogElement>('delete-dialog').oncancel = () => { deletingEntry = null; };
+document.addEventListener('pointerdown', event => { if(!el('file-context').contains(event.target as Node)) closeFileMenu(); });
 el('refresh').onclick = async () => { if(!folder || busy) return; busy = true; try { folder = await invoke<Folder>('list_files'); renderTree(); } catch(e) { notice(e); } finally { busy = false; } };
 el('cancel-leave').onclick = () => { afterLeave = null; el<HTMLDialogElement>('unsaved').close(); };
 el<HTMLDialogElement>('unsaved').oncancel = () => { afterLeave = null; };
@@ -267,6 +379,7 @@ async function finishLeave(keep: boolean) {
 el('save-leave').onclick = () => { void finishLeave(true); };
 el('discard-leave').onclick = () => { void finishLeave(false); };
 document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !el('file-context').hidden) { closeFileMenu(); e.preventDefault(); return; }
   if ((e.ctrlKey || e.metaKey) && ['s','o','k'].includes(e.key.toLowerCase())) {
     e.preventDefault(); if(document.querySelector('dialog[open]'))return;
     if(e.key.toLowerCase()==='s')void save(); else if(e.key.toLowerCase()==='o')void chooseTarget(e.shiftKey ? 'folder' : 'file'); else openFinder();

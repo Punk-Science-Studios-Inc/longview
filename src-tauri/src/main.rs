@@ -70,8 +70,18 @@ async fn open_file(state: State<'_, AppState>) -> Result<Option<Opened>, String>
 }
 
 #[tauri::command]
-fn list_files(state: State<'_, AppState>) -> Result<Folder, String> {
+async fn list_files(state: State<'_, AppState>) -> Result<Folder, String> {
     with_workspace(&state, Workspace::list)
+}
+
+#[tauri::command]
+fn parse_note(text: String) -> longview_core::metadata::ParsedNote {
+    longview_core::metadata::parse_note(&text)
+}
+
+#[tauri::command]
+async fn delete_file(path: String, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    with_session(&state, |session| session.delete_file(&path))
 }
 
 #[tauri::command]
@@ -122,6 +132,8 @@ fn main() {
             open_file,
             startup,
             list_files,
+            parse_note,
+            delete_file,
             read_note,
             save_note,
             read_image,

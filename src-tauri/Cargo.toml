@@ -1,6 +1,6 @@
 [package]
 name = "longview"
-version = "0.1.0"
+version = "0.2.0"
 description = "A quiet workspace for Markdown"
 authors = ["Punk Science Studios Inc."]
 repository = "https://github.com/Punk-Science-Studios-Inc/longview"

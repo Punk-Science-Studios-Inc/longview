@@ -56,6 +56,8 @@ Opening a folder shows the Files column and previews the first note without repl
 - Follow relative note links and headings, inspect local images, and open web links in the default browser.
 - Use Ctrl/Cmd+O to open a file, Ctrl/Cmd+Shift+O to choose a folder, and Ctrl/Cmd+K to find a note. Files is visible when opening a folder and can be toggled on demand.
 - Save, discard, or cancel before switching documents or closing with unsaved changes.
+- YAML frontmatter is displayed as properties rather than Markdown. Tags in the header and Files tag index are clickable filters, supporting case-insensitive matches and nested tags. Edit mode preserves the full source, including unknown properties and YAML formatting.
+- Right-click a note or image in Files and choose Delete to move it to the system Trash/Recycle Bin. The confirmation identifies the file and warns about any unsaved changes. Files outside the workspace and folders cannot be deleted through this action.
 
 The original files remain the source of truth. Saves use a temporary file in the same directory and an atomic replacement. An external-edit check runs before replacement; this is not a distributed lock against other programs writing at precisely the same instant. Preserve backups as usual.
 
