@@ -1,0 +1,11 @@
+/node_modules/
+/dist/
+/target/
+/src-tauri/gen/
+/longview-site.tar.gz
+/layout-studies/
+/src-tauri/icons/android/
+/src-tauri/icons/ios/
+/src-tauri/icons/Square*.png
+/src-tauri/icons/StoreLogo.png
+*.log

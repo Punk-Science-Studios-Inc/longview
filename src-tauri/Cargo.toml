@@ -1,0 +1,22 @@
+[package]
+name = "longview"
+version = "0.1.0"
+description = "A quiet workspace for Markdown"
+authors = ["Punk Science Studios Inc."]
+repository = "https://github.com/Punk-Science-Studios-Inc/longview"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+longview-core = { path = "../crates/longview-core" }
+serde = { version = "1", features = ["derive"] }
+rfd = "0.15"
+base64 = "0.22"
+dirs = "6"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
