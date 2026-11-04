@@ -54,7 +54,8 @@ Opening a folder shows the Files column and previews the first note without repl
 - Read rendered Markdown or edit source with CodeMirror, undo, and syntax highlighting.
 - Save with Ctrl/Cmd+S; file changes made outside Longview produce a conflict message rather than an overwrite.
 - Follow relative note links and headings, inspect local images, and open web links in the default browser.
-- Use Ctrl/Cmd+O to open a file, Ctrl/Cmd+Shift+O to choose a folder, and Ctrl/Cmd+K to find a note. Files is visible when opening a folder and can be toggled on demand.
+- Use Ctrl/Cmd+O to open a file, Ctrl/Cmd+Shift+O to choose a folder, and Ctrl/Cmd+K to reveal and focus the Files filter. The filter matches filenames, paths, titles, and tags in the folder tree.
+- Use **Search vault** or Ctrl/Cmd+Shift+F to search note contents across the open folder, independently of file and tag filters. Search matches a literal word or phrase case-insensitively, including frontmatter and unsaved changes in the active note. Results show highlighted excerpts and source line numbers; use the arrow keys and Enter, or click, to open a match in Edit with the text selected. Search shows up to 200 matching lines and reports skipped unreadable notes. It reads current files on each search, so no index needs rebuilding.
 - Save, discard, or cancel before switching documents or closing with unsaved changes.
 - YAML frontmatter is displayed as properties rather than Markdown. Tags in the header and Files tag index are clickable filters, supporting case-insensitive matches and nested tags. Edit mode preserves the full source, including unknown properties and YAML formatting.
 - Right-click a note or image in Files and choose Delete to move it to the system Trash/Recycle Bin. The confirmation identifies the file and warns about any unsaved changes. Files outside the workspace and folders cannot be deleted through this action.

@@ -1,5 +1,6 @@
 //! Filesystem operations independent of the desktop shell.
 pub mod metadata;
+pub mod search;
 pub mod session;
 use serde::Serialize;
 use std::{
@@ -27,7 +28,7 @@ pub struct Folder {
     pub entries: Vec<Entry>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
 }
@@ -43,16 +44,7 @@ impl Workspace {
 
     pub fn list(&self) -> Result<Folder, String> {
         let mut entries = Vec::new();
-        // Never follow symlinks or descend into hidden/tool directories.
-        for item in WalkDir::new(&self.root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                e.depth() == 0
-                    || !e.file_name().to_string_lossy().starts_with('.')
-                        && !matches!(e.file_name().to_str(), Some("node_modules" | "target"))
-            })
-        {
+        for item in self.walk() {
             let item = item.map_err(|e| e.to_string())?;
             if item.depth() == 0 || item.file_type().is_symlink() {
                 continue;
@@ -104,6 +96,19 @@ impl Workspace {
                 .into_owned(),
             entries,
         })
+    }
+
+    fn walk(&self) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+        // Browsing and search share the same vault boundary and exclusions.
+        WalkDir::new(&self.root)
+            .follow_links(false)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|e| {
+                e.depth() == 0
+                    || !e.file_name().to_string_lossy().starts_with('.')
+                        && !matches!(e.file_name().to_str(), Some("node_modules" | "target"))
+            })
     }
 
     fn resolve(&self, relative: &str) -> Result<PathBuf, String> {

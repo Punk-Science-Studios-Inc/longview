@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Replace the duplicate file finder with vault-wide content search, including highlighted excerpts, line locations, keyboard navigation, and the active note's unsaved text.
+- Use Ctrl/Cmd+K to focus the Files filter and Ctrl/Cmd+Shift+F to search all note contents independently of sidebar filters.
+
 ## 0.2.0
 
 - Apply the Longview sunset-and-Markdown-rule icon and supplied wordmark throughout the app and installer icons.

@@ -15,6 +15,8 @@ interface NoteMetadata { properties: Record<string, unknown>; tags: string[]; er
 interface ParsedNote { body: string; metadata: NoteMetadata }
 interface Folder { name: string; entries: Entry[] }
 interface Opened { folder: Folder; file: string | null }
+interface SearchHit { path: string; line: number; column: number; length: number; before: string; matched: string; after: string }
+interface SearchResults { hits: SearchHit[]; truncated: boolean; skipped: number }
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 let folder: Folder | null = null, path = '', original = '', text = '', editMode = false;
 let folderMode = false;
@@ -22,6 +24,7 @@ let activeTag = '';
 let contextEntry: Entry | null = null, deletingEntry: Entry | null = null;
 const trashName = navigator.platform.startsWith('Win') ? 'Recycle Bin' : 'Trash';
 let busy = false, saving = false, generation = 0, editTimer: ReturnType<typeof setTimeout>;
+let searchVersion = 0, searchRunning = false, searchTimer: ReturnType<typeof setTimeout>;
 const editorStates = new Map<string, EditorState>();
 const closedFolders = new Set<string>();
 let afterLeave: (() => Promise<void>) | null = null;
@@ -85,6 +88,7 @@ function togglePane(id: string, control: string, show = el(id).hidden) {
 }
 
 async function applyOpened(opened: Opened) {
+  cancelSearch(); el<HTMLDialogElement>('search-dialog').close(); el<HTMLInputElement>('search-input').value = '';
   folder = opened.folder; folderMode = opened.file === null;
   path = ''; text = original = ''; generation++; editorStates.clear(); closedFolders.clear(); clearNotice();
   el<HTMLInputElement>('filter').value = '';
@@ -130,35 +134,38 @@ async function loadNote(next: string, hash = '', remember = true) {
     if (hash) jumpToHeading(hash); else el('preview').scrollTop = 0;
   } catch (e) { notice(e); }
 }
-function navigate(next: string, hash = '') {
+function navigate(next: string, hash = '', match?: SearchHit) {
   if (busy || saving) return;
   if (next === path) {
     // An explicit open of the automatically previewed note must replace the saved folder,
     // while retaining any unsaved editor contents.
     void invoke('read_note', { path: next, remember: true }).catch(notice);
     if (hash) { setMode(false); jumpToHeading(hash); }
+    if (match) revealSearchMatch(match);
     return;
   }
-  void mayLeave(async () => { busy = true; try { await loadNote(next, hash); } finally { busy = false; } });
+  void mayLeave(async () => {
+    busy = true;
+    try { await loadNote(next, hash); if (match && path === next) revealSearchMatch(match); }
+    finally { busy = false; }
+  });
 }
 function jumpToHeading(hash: string) {
   let id = hash; try { id = decodeURIComponent(hash); } catch { /* literal fragment */ }
   const target = [...el('preview').querySelectorAll('[id]')].find(h => h.id === id);
   target?.scrollIntoView({ block: 'start' });
 }
-function makeFile(entry: Entry, includePath = false) {
+function makeFile(entry: Entry) {
   const button = document.createElement('button'); button.className = `file ${entry.path === path ? 'active' : ''}`;
   const icon = document.createElement('span'); icon.textContent = entry.kind === 'image' ? '▧' : '▤'; icon.setAttribute('aria-hidden', 'true');
-  const label = document.createElement('span'); label.textContent = includePath ? entry.path : entry.name;
+  const label = document.createElement('span'); label.textContent = entry.name;
   button.append(icon, label); button.title = entry.path;
   if (entry.path === path) button.setAttribute('aria-current', 'page');
-  button.onclick = () => { el<HTMLDialogElement>('finder').close(); if (entry.kind === 'note') navigate(entry.path); else void inspectImage(entry.path, entry.name); };
-  if(!includePath) {
-    button.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, button, event.clientX, event.clientY); };
-    button.onkeydown = event => {
-      if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, button); }
-    };
-  }
+  button.onclick = () => { if (entry.kind === 'note') navigate(entry.path); else void inspectImage(entry.path, entry.name); };
+  button.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, button, event.clientX, event.clientY); };
+  button.onkeydown = event => {
+    if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, button); }
+  };
   return button;
 }
 function tagButton(tag: string, label = `#${tag}`) {
@@ -301,14 +308,90 @@ async function inspectImage(imagePath: string, description: string) {
     el<HTMLDialogElement>('image-dialog').showModal();
   } catch(e) { notice(e); }
 }
-function findFiles() {
-  const box = el('find-results'); box.replaceChildren();
-  const q = el<HTMLInputElement>('find-input').value.toLowerCase();
-  const matches = folder?.entries.filter(e => e.kind === 'note' && fileMatches(e,q,activeTag)).slice(0,100) || [];
-  matches.forEach(e => box.append(makeFile(e, true)));
-  if (!matches.length) box.textContent = folder ? 'No matching notes.' : 'Open a folder to find your notes.';
+function focusFileFilter() {
+  togglePane('files-pane', 'files', true);
+  el<HTMLInputElement>('filter').focus(); el<HTMLInputElement>('filter').select();
 }
-function openFinder() { findFiles(); el<HTMLDialogElement>('finder').showModal(); el<HTMLInputElement>('find-input').focus(); }
+function revealSearchMatch(hit: SearchHit) {
+  setMode(true);
+  const doc = editor.state.doc, line = doc.line(Math.min(hit.line, doc.lines));
+  let from = line.from + Math.min(hit.column, line.length);
+  if (doc.sliceString(from, Math.min(from + hit.length, doc.length)) !== hit.matched) {
+    // An external edit may have shifted the result since the search completed.
+    from = doc.toString().indexOf(hit.matched);
+    if (from < 0) { notice('This note changed since the search. Search again to locate the match.'); return; }
+  }
+  editor.dispatch({ selection: { anchor: from, head: from + hit.length }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
+  editor.focus();
+}
+function cancelSearch() {
+  clearTimeout(searchTimer); searchVersion++;
+  el('search-results').setAttribute('aria-busy', 'false');
+}
+function scheduleSearch() {
+  cancelSearch(); el('search-results').replaceChildren();
+  const query = el<HTMLInputElement>('search-input').value.trim();
+  el('search-status').textContent = !folder ? 'Open a folder to search your notes.' : !query ? 'Type a word or phrase to search this vault.' : 'Searching…';
+  if (!folder || !query) return;
+  el('search-results').setAttribute('aria-busy', 'true');
+  searchTimer = setTimeout(() => { void searchNotes(); }, 180);
+}
+async function searchNotes() {
+  // Keep at most one scan in flight; edits made during it trigger the newest query next.
+  if (searchRunning || !el<HTMLDialogElement>('search-dialog').open || !folder) return;
+  const query = el<HTMLInputElement>('search-input').value.trim();
+  if (!query) return;
+  const version = searchVersion;
+  searchRunning = true;
+  try {
+    const result = await invoke<SearchResults>('search_notes', { query, draft: path && dirty() ? { path, text } : null });
+    if (version !== searchVersion) return;
+    const box = el('search-results'); box.replaceChildren();
+    for (const hit of result.hits) {
+      const button = document.createElement('button'); button.className = 'search-result';
+      const location = document.createElement('span'); location.className = 'search-location'; location.textContent = `${hit.path} · Line ${hit.line}`;
+      const excerpt = document.createElement('span'); excerpt.className = 'search-excerpt';
+      const marked = document.createElement('mark'); marked.textContent = hit.matched;
+      excerpt.append(hit.before, marked, hit.after); button.append(location, excerpt);
+      button.onclick = () => { cancelSearch(); el<HTMLDialogElement>('search-dialog').close(); navigate(hit.path, '', hit); };
+      box.append(button);
+    }
+    const count = result.hits.length, notes = new Set(result.hits.map(hit => hit.path)).size;
+    const summary = result.truncated ? `Showing the first ${count} matching lines. Refine your search for more.`
+      : count ? `${count} matching ${count === 1 ? 'line' : 'lines'} in ${notes} ${notes === 1 ? 'note' : 'notes'}.` : 'No matching note contents.';
+    el('search-status').textContent = summary + (result.skipped ? ` ${result.skipped} ${result.skipped === 1 ? 'file or folder could' : 'files or folders could'} not be searched.` : '');
+  } catch (error) {
+    if (version === searchVersion) el('search-status').textContent = `Search failed: ${String(error)}`;
+  } finally {
+    searchRunning = false;
+    if (version === searchVersion) el('search-results').setAttribute('aria-busy', 'false');
+    else { clearTimeout(searchTimer); void searchNotes(); }
+  }
+}
+function openSearch() {
+  el<HTMLDialogElement>('search-dialog').showModal();
+  el<HTMLInputElement>('search-input').focus(); el<HTMLInputElement>('search-input').select(); scheduleSearch();
+}
+el('search-dialog').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !event.isComposing) {
+    event.preventDefault(); event.stopPropagation();
+    cancelSearch(); el<HTMLDialogElement>('search-dialog').close(); return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key) || event.isComposing) return;
+  const results = [...el('search-results').querySelectorAll<HTMLButtonElement>('button')];
+  const current = results.indexOf(document.activeElement as HTMLButtonElement);
+  if (document.activeElement !== el('search-input') && current < 0) return;
+  if (event.key === 'Enter') {
+    if (current < 0 && results.length) { event.preventDefault(); results[0].click(); }
+    return;
+  }
+  if (!results.length) return;
+  event.preventDefault();
+  if (event.key === 'ArrowUp' && current === 0) { el('search-input').focus(); return; }
+  const next = current < 0 ? event.key === 'ArrowUp' ? results.length - 1 : 0
+    : Math.max(0, Math.min(results.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+  results[next].focus(); results[next].scrollIntoView({ block: 'nearest' });
+});
 
 function closeFileMenu() { el('file-context').hidden = true; contextEntry = null; }
 function openFileMenu(entry: Entry, anchor: HTMLElement, x = 0, y = 0) {
@@ -358,8 +441,9 @@ el('details').onclick = () => togglePane('details-pane','details');
 el('close-details').onclick = () => { togglePane('details-pane','details',false); el('details').focus(); };
 el('read').onclick = () => setMode(false); el('edit').onclick = () => setMode(true);
 el('save').onclick = () => { void save(); }; el('filter').oninput = renderTree;
-el('find').onclick = openFinder; el('find-input').oninput = findFiles;
-el('close-finder').onclick = () => el<HTMLDialogElement>('finder').close();
+el('search').onclick = openSearch; el('search-input').oninput = scheduleSearch;
+el('close-search').onclick = () => { cancelSearch(); el<HTMLDialogElement>('search-dialog').close(); };
+el<HTMLDialogElement>('search-dialog').oncancel = cancelSearch;
 el('close-image').onclick = () => el<HTMLDialogElement>('image-dialog').close();
 el('dismiss-notice').onclick = clearNotice;
 el('delete-file').onclick = requestDelete;
@@ -380,12 +464,20 @@ el('save-leave').onclick = () => { void finishLeave(true); };
 el('discard-leave').onclick = () => { void finishLeave(false); };
 document.addEventListener('keydown', e => {
   if(e.key === 'Escape' && !el('file-context').hidden) { closeFileMenu(); e.preventDefault(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault(); if (!document.querySelector('dialog[open]')) openSearch(); return;
+  }
   if ((e.ctrlKey || e.metaKey) && ['s','o','k'].includes(e.key.toLowerCase())) {
     e.preventDefault(); if(document.querySelector('dialog[open]'))return;
-    if(e.key.toLowerCase()==='s')void save(); else if(e.key.toLowerCase()==='o')void chooseTarget(e.shiftKey ? 'folder' : 'file'); else openFinder();
+    if(e.key.toLowerCase()==='s')void save(); else if(e.key.toLowerCase()==='o')void chooseTarget(e.shiftKey ? 'folder' : 'file'); else focusFileFilter();
   }
   if(e.key==='Escape' && !document.querySelector('dialog[open]')) { togglePane('files-pane','files',false); togglePane('details-pane','details',false); }
 });
+const shortcutModifier = /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd' : 'Ctrl';
+el('search').title = `Search vault (${shortcutModifier}+Shift+F)`;
+el('search').querySelector('kbd')!.textContent = `${shortcutModifier} Shift F`;
+el('files').title = `Filter files (${shortcutModifier}+K)`;
+el('filter').title = `Filter filenames, titles, and tags (${shortcutModifier}+K)`;
 if(native) {
   void getCurrentWindow().onCloseRequested(async e => {
     if(dirty() || saving || busy) { e.preventDefault(); if(!saving && !busy) await mayLeave(async () => { await getCurrentWindow().destroy(); }); }

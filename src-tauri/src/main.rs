@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use longview_core::{
+    search::{SearchDraft, SearchResults},
     session::{Opened, Session},
     Folder, Workspace,
 };
@@ -75,6 +76,19 @@ async fn list_files(state: State<'_, AppState>) -> Result<Folder, String> {
 }
 
 #[tauri::command]
+async fn search_notes(
+    query: String,
+    draft: Option<SearchDraft>,
+    state: State<'_, AppState>,
+) -> Result<SearchResults, String> {
+    let workspace = with_workspace(&state, |workspace| Ok(workspace.clone()))?;
+    // Disk scanning must not block the UI or hold the session lock.
+    tauri::async_runtime::spawn_blocking(move || workspace.search_notes(&query, draft.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn parse_note(text: String) -> longview_core::metadata::ParsedNote {
     longview_core::metadata::parse_note(&text)
 }
@@ -132,6 +146,7 @@ fn main() {
             open_file,
             startup,
             list_files,
+            search_notes,
             parse_note,
             delete_file,
             read_note,
