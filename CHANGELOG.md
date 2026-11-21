@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Make displayed vault/file paths and Details links clickable, with file-explorer actions for every file and folder.
+- Show other file types and empty folders in Files; open folder and attachment links in the system file explorer.
+- Support absolute paths and file URLs, link-like properties, inline references, and linked images while preserving note navigation and scoped file access.
+
 ## 0.3.0
 
 - Replace the duplicate file finder with vault-wide content search, including highlighted excerpts, line locations, keyboard navigation, and the active note's unsaved text.

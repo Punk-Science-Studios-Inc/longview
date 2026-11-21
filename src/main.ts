@@ -6,11 +6,11 @@ import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { localTarget, headingId } from './paths';
+import { localTarget, headingId, linkTarget } from './paths';
 import { fileMatches } from './filter';
 import './style.css';
 
-interface Entry { path: string; name: string; kind: 'folder' | 'note' | 'image'; tags: string[]; title: string | null }
+interface Entry { path: string; name: string; kind: 'folder' | 'note' | 'image' | 'file'; tags: string[]; title: string | null }
 interface NoteMetadata { properties: Record<string, unknown>; tags: string[]; error: string | null }
 interface ParsedNote { body: string; metadata: NoteMetadata }
 interface Folder { name: string; entries: Entry[] }
@@ -61,6 +61,7 @@ function updateStatus() {
   el('status').textContent = saving ? 'Saving…' : path ? dirty() ? 'Unsaved changes' : 'Saved to disk' : 'Ready when you are.';
   el('words').textContent = path ? `${text.trim().split(/\s+/).filter(Boolean).length} words` : '';
   el('filename').textContent = path ? `${path.split('/').pop()}${dirty() ? ' •' : ''}` : folder ? 'Choose a note' : 'No folder open';
+  el<HTMLButtonElement>('filename').disabled = !path;
   document.title = `${path ? path.split('/').pop() + (dirty() ? ' •' : '') + ' — ' : ''}Longview`;
   el<HTMLButtonElement>('edit').disabled = !path;
   el<HTMLButtonElement>('read').disabled = !path;
@@ -78,10 +79,14 @@ async function mayLeave(action: () => Promise<void>) {
   if (dirty()) { afterLeave = action; el('unsaved-description').textContent = `${path.split('/').pop()} has unsaved changes.`; el<HTMLDialogElement>('unsaved').showModal(); }
   else await action();
 }
-function setMode(edit: boolean) {
+function setMode(edit: boolean, hash = '') {
   editMode = edit; el('editor').hidden = !edit || !path; el('preview').hidden = edit || !path;
   el('read').setAttribute('aria-pressed', String(!edit)); el('edit').setAttribute('aria-pressed', String(edit));
-  if (edit) { editor.requestMeasure(); editor.focus(); } else void renderNote();
+  if (edit) { editor.requestMeasure(); editor.focus(); }
+  else {
+    const activePath = path;
+    void renderNote().then(() => { if (hash && path === activePath && !editMode) jumpToHeading(hash); });
+  }
 }
 function togglePane(id: string, control: string, show = el(id).hidden) {
   el(id).hidden = !show; el(control).setAttribute('aria-expanded', String(show));
@@ -95,7 +100,8 @@ async function applyOpened(opened: Opened) {
   activeTag = ''; document.querySelector('.workspace')!.classList.remove('tag-filtering');
   document.querySelector('.workspace')!.classList.toggle('folder-mode', folderMode);
   el('workspace-name').textContent = folder.name; el('tree-heading').textContent = folder.name.toUpperCase();
-  el('breadcrumbs').textContent = folder.name;
+  el<HTMLButtonElement>('workspace-name').disabled = el<HTMLButtonElement>('tree-heading').disabled = false;
+  renderBreadcrumbs();
   renderTree(); updateStatus(); await renderNote();
   togglePane('files-pane', 'files', folderMode);
   const next = opened.file ?? folder.entries.find(e => e.kind === 'note')?.path;
@@ -127,7 +133,7 @@ async function loadNote(next: string, hash = '', remember = true) {
     const cached = editorStates.get(path);
     editor.setState(cached?.sliceDoc() === contents ? cached : noteState(contents));
     text = editor.state.sliceDoc(); clearNotice();
-    el('breadcrumbs').textContent = `${folder?.name} / ${path.split('/').join(' / ')}`;
+    renderBreadcrumbs();
     el('empty').hidden = true; setMode(editMode); updateStatus(); renderTree();
     if (!folderMode && !activeTag) togglePane('files-pane', 'files', false);
     await renderNote();
@@ -140,7 +146,7 @@ function navigate(next: string, hash = '', match?: SearchHit) {
     // An explicit open of the automatically previewed note must replace the saved folder,
     // while retaining any unsaved editor contents.
     void invoke('read_note', { path: next, remember: true }).catch(notice);
-    if (hash) { setMode(false); jumpToHeading(hash); }
+    if (hash) setMode(false, hash);
     if (match) revealSearchMatch(match);
     return;
   }
@@ -152,21 +158,71 @@ function navigate(next: string, hash = '', match?: SearchHit) {
 }
 function jumpToHeading(hash: string) {
   let id = hash; try { id = decodeURIComponent(hash); } catch { /* literal fragment */ }
-  const target = [...el('preview').querySelectorAll('[id]')].find(h => h.id === id);
+  const target = [...el('preview').querySelectorAll('[data-heading-id]')].find(h => h.getAttribute('data-heading-id') === id);
   target?.scrollIntoView({ block: 'start' });
 }
+function showInExplorer(location: string) {
+  void invoke('show_in_explorer', { path: location }).catch(notice);
+}
+function pathButton(label: string, location: string, compact = false) {
+  const button = document.createElement('button'); button.className = compact ? 'explorer-action' : 'path-link';
+  button.textContent = compact ? '↗' : label;
+  button.title = `Show ${label} in file explorer`;
+  button.setAttribute('aria-label', button.title);
+  button.onclick = event => { event.preventDefault(); event.stopPropagation(); showInExplorer(location); };
+  return button;
+}
+function renderBreadcrumbs() {
+  const crumbs = el('breadcrumbs'); crumbs.replaceChildren();
+  if (!folder) { crumbs.textContent = 'Your field notes'; return; }
+  crumbs.append(pathButton(folder.name, ''));
+  const parts = path ? path.split('/') : [];
+  parts.forEach((part, index) => {
+    const separator = document.createElement('span'); separator.textContent = '/'; separator.setAttribute('aria-hidden', 'true');
+    crumbs.append(separator, pathButton(part, parts.slice(0, index + 1).join('/')));
+  });
+}
+function activateLink(href: string, source: string) {
+  const target = linkTarget(source, href);
+  if (!target) { notice('This link uses an unsupported address.'); return; }
+  if (target.kind === 'external') { void invoke('open_external', { url: target.url }).catch(notice); return; }
+  if (target.workspacePath !== null && /\.(md|markdown)$/i.test(target.workspacePath)) {
+    navigate(target.workspacePath, target.hash);
+  } else showInExplorer(target.path);
+}
+function bindLink(link: HTMLAnchorElement, href: string, source: string) {
+  const activate = (event: MouseEvent) => {
+    if (event.type === 'auxclick' && event.button !== 1) return;
+    event.preventDefault(); event.stopPropagation(); activateLink(href, source);
+  };
+  link.onclick = activate; link.onauxclick = activate;
+}
+function detailLink(label: string, href: string, source: string) {
+  const link = document.createElement('a'); link.textContent = label; link.href = href;
+  bindLink(link, href, source); return link;
+}
+function referenceHref(value: string, source: string): string | null {
+  if (/^(https?:\/\/|mailto:|tel:|file:)/i.test(value)) return value;
+  const href = value.replaceAll('\\', '/').split('/').map(encodeURIComponent).join('/');
+  const target = localTarget(source, href);
+  if (/^(?:[\/\\]|\.{1,2}[\/\\]|[a-z]:[\/\\])/i.test(value)
+      || target && folder?.entries.some(entry => entry.path === target.path)) return href;
+  return null;
+}
 function makeFile(entry: Entry) {
+  const row = document.createElement('div'); row.className = 'file-row';
   const button = document.createElement('button'); button.className = `file ${entry.path === path ? 'active' : ''}`;
   const icon = document.createElement('span'); icon.textContent = entry.kind === 'image' ? '▧' : '▤'; icon.setAttribute('aria-hidden', 'true');
   const label = document.createElement('span'); label.textContent = entry.name;
   button.append(icon, label); button.title = entry.path;
   if (entry.path === path) button.setAttribute('aria-current', 'page');
-  button.onclick = () => { if (entry.kind === 'note') navigate(entry.path); else void inspectImage(entry.path, entry.name); };
+  button.onclick = () => { if (entry.kind === 'note') navigate(entry.path); else if (entry.kind === 'image') void inspectImage(entry.path, entry.name); else showInExplorer(entry.path); };
   button.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, button, event.clientX, event.clientY); };
   button.onkeydown = event => {
     if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, button); }
   };
-  return button;
+  row.append(button, pathButton(entry.name, entry.path, true));
+  return row;
 }
 function tagButton(tag: string, label = `#${tag}`) {
   const button = document.createElement('button'); button.className = 'tag'; button.textContent = label;
@@ -200,6 +256,7 @@ function renderTree() {
   const leaves = folder.entries.filter(e => e.kind !== 'folder' && fileMatches(e,q,activeTag));
   const visiblePaths = new Set(leaves.map(e => e.path));
   const needed = new Set<string>();
+  if (!q && !activeTag) for (const entry of folder.entries) if (entry.kind === 'folder') needed.add(entry.path);
   for (const entry of leaves) { const parts = entry.path.split('/'); parts.pop(); while(parts.length) { needed.add(parts.join('/')); parts.pop(); } }
   const children = new Map<string, Entry[]>();
   for(const entry of folder.entries) {
@@ -213,13 +270,19 @@ function renderTree() {
     for (const entry of entries) {
       if (entry.kind !== 'folder') { container.append(makeFile(entry)); continue; }
       const details = document.createElement('details'); details.open = q !== '' || !!activeTag || !closedFolders.has(entry.path);
-      const summary = document.createElement('summary'); summary.textContent = entry.name; details.append(summary);
+      const summary = document.createElement('summary');
+      const label = document.createElement('span'); label.textContent = entry.name;
+      summary.append(label, pathButton(entry.name, entry.path, true)); details.append(summary);
+      summary.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, summary, event.clientX, event.clientY); };
+      summary.onkeydown = event => {
+        if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, summary); }
+      };
       details.ontoggle = () => { if (details.open) closedFolders.delete(entry.path); else closedFolders.add(entry.path); };
       branch(entry.path, details); container.append(details);
     }
   }
   branch('', tree);
-  if (!leaves.length) tree.textContent = q || activeTag ? 'No matching files. Clear the tag or text filter to see more.' : 'No notes or images in this folder.';
+  if (!tree.childElementCount) tree.textContent = q || activeTag ? 'No matching files. Clear the tag or text filter to see more.' : 'No files in this folder.';
   const total = folder.entries.filter(e => e.kind === 'note').length, shown = leaves.filter(e => e.kind === 'note').length;
   el('file-count').textContent = q || activeTag ? `${shown} of ${total} notes` : `${total} notes`;
 }
@@ -235,11 +298,17 @@ async function renderNote() {
   if(entry && (JSON.stringify(entry.tags) !== JSON.stringify(parsed.metadata.tags) || entry.title !== title)) {
     entry.tags = parsed.metadata.tags; entry.title = title; renderTree();
   }
-  // Strip document-controlled style, scripts, frames, forms, IDs, and local file URLs.
+  // Keep local file links inert until our click handler sends them to the explorer.
   preview.innerHTML = DOMPurify.sanitize(marked.parse(parsed.body, { async: false }), {
     FORBID_TAGS: ['style', 'script', 'iframe', 'form', 'input', 'button', 'textarea', 'video', 'audio'],
     FORBID_ATTR: ['style', 'id', 'name', 'srcset', 'target'],
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|file):|[a-z]:[\\/]|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
   });
+  for (const code of preview.querySelectorAll('code')) {
+    if (code.closest('pre, a')) continue;
+    const label = code.textContent || '', href = referenceHref(label, activePath);
+    if (href !== null) code.replaceChildren(detailLink(label, href, activePath));
+  }
   if(title && !preview.querySelector('h1')) { const heading = document.createElement('h1'); heading.textContent = title; preview.prepend(heading); }
   const properties = document.createElement('div'); properties.className = 'note-properties';
   for(const key of ['date','status']) {
@@ -253,34 +322,36 @@ async function renderNote() {
   const headingCounts = new Map<string, number>();
   preview.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(h => {
     const base = headingId(h.textContent || ''), count = headingCounts.get(base) || 0;
-    headingCounts.set(base,count+1); h.id = count ? `${base}-${count}` : base;
+    const id = count ? `${base}-${count}` : base;
+    headingCounts.set(base,count+1); h.id = `note-heading-${id}`; h.setAttribute('data-heading-id', id);
   });
   const links = [...preview.querySelectorAll<HTMLAnchorElement>('a[href]')];
   for (const link of links) {
     const href = link.getAttribute('href')!;
-    link.onclick = e => {
-      e.preventDefault();
-      if (/^(https?:|mailto:)/i.test(href)) { void invoke('open_external', { url: href }).catch(notice); return; }
-      const target = localTarget(path, href);
-      if (!target) { notice('That link points outside the open folder or uses an unsupported URL.'); return; }
-      const entry = folder?.entries.find(e => e.path === target.path);
-      if (entry?.kind === 'image') void inspectImage(entry.path, entry.name);
-      else if (entry?.kind === 'note') navigate(target.path, target.hash);
-      else notice(`Cannot find “${target.path}” in this folder. Try Refresh if it was added recently.`);
-    };
+    bindLink(link, href, activePath);
   }
   const images = [...preview.querySelectorAll<HTMLImageElement>('img')];
   renderDetails(links, images, parsed.metadata);
   await Promise.all(images.map(async image => {
     const src = image.getAttribute('src') || '';
-    if (/^https:/i.test(src)) { image.referrerPolicy = 'no-referrer'; return; }
+    if (/^https:/i.test(src)) {
+      image.referrerPolicy = 'no-referrer';
+      if (!image.closest('a[href]')) {
+        image.tabIndex = 0; image.setAttribute('role', 'link');
+        image.onclick = () => activateLink(src, activePath);
+        image.onkeydown = event => { if (event.key === 'Enter') activateLink(src, activePath); };
+      }
+      return;
+    }
     const target = localTarget(activePath, src);
     image.removeAttribute('src');
     if (!target) { image.alt = `${image.alt || 'Image'} (unsupported path)`; return; }
     try {
       const data = await invoke<string>('read_image', { path: target.path });
       if (path !== activePath || text !== activeText || !image.isConnected) return;
-      image.src = data; image.tabIndex = 0; image.setAttribute('role','button'); image.title = `Inspect ${target.path}`;
+      image.src = data;
+      if (image.closest('a[href]')) return;
+      image.tabIndex = 0; image.setAttribute('role','button'); image.title = `Inspect ${target.path}`;
       image.onclick = () => { void inspectImage(target.path, image.alt); };
       image.onkeydown = e => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); image.click(); } };
     } catch { image.alt = `${image.alt || 'Image'} — unavailable: ${target.path}`; }
@@ -288,23 +359,38 @@ async function renderNote() {
 }
 function renderDetails(links: HTMLAnchorElement[], images: HTMLImageElement[], metadata: NoteMetadata) {
   const box = el('details-content'); box.replaceChildren();
+  const source = path;
+  const heading = (label: string) => { const h = document.createElement('h3'); h.textContent = label; box.append(h); };
   const section = (label: string, lines: string[]) => {
-    const h = document.createElement('h3'); h.textContent = label; box.append(h);
+    heading(label);
     for(const line of lines.length ? lines : ['None on this page.']) { const p = document.createElement('p'); p.textContent = line; box.append(p); }
   };
-  section('FILE', [path]);
-  section('PROPERTIES', Object.entries(metadata.properties).filter(([key]) => key !== 'tags').map(([key,value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`));
+  heading('FILE'); box.append(pathButton(path, path));
+  heading('PROPERTIES');
+  const properties = Object.entries(metadata.properties).filter(([key]) => key !== 'tags');
+  if (!properties.length) { const p = document.createElement('p'); p.textContent = 'None on this page.'; box.append(p); }
+  for (const [key, value] of properties) {
+    const label = typeof value === 'string' ? value : JSON.stringify(value), href = referenceHref(label, source);
+    const p = document.createElement('p'); p.append(`${key}: `, href === null ? label : detailLink(label, href, source)); box.append(p);
+  }
   if(metadata.tags.length) { const h = document.createElement('h3'); h.textContent = 'TAGS'; box.append(h); metadata.tags.forEach(tag => box.append(tagButton(tag))); }
   if(metadata.error) section('FRONTMATTER ERROR', [metadata.error]);
-  section(`IMAGES · ${images.length}`, images.map(img => `${img.alt || 'No description'}\n${img.getAttribute('src') || ''}`));
-  section(`LINKS · ${links.length}`, links.map(a => `${a.textContent}\n${a.getAttribute('href')}`));
+  const linkSection = (label: string, items: {label: string; href: string}[]) => {
+    if (!items.length) { section(label, []); return; }
+    heading(label);
+    for (const item of items) {
+      const p = document.createElement('p'); p.append(detailLink(item.label, item.href, source)); box.append(p);
+    }
+  };
+  linkSection(`IMAGES · ${images.length}`, images.map(img => ({label: `${img.alt || 'No description'}\n${img.getAttribute('src') || ''}`, href: img.getAttribute('src') || ''})));
+  linkSection(`LINKS · ${links.length}`, links.map(a => ({label: `${a.textContent}\n${a.getAttribute('href')}`, href: a.getAttribute('href')!})));
   const hint = document.createElement('p'); hint.textContent = 'Use Edit to change image descriptions and link destinations.'; hint.className = 'detail-hint'; box.append(hint);
 }
 async function inspectImage(imagePath: string, description: string) {
   try {
     const data = await invoke<string>('read_image', { path: imagePath });
     el<HTMLImageElement>('large-image').src = data; el<HTMLImageElement>('large-image').alt = description;
-    el('image-title').textContent = imagePath.split('/').pop()!; el('image-path').textContent = imagePath;
+    el('image-title').textContent = imagePath.split('/').pop()!; el('image-path').replaceChildren(pathButton(imagePath, imagePath));
     el<HTMLDialogElement>('image-dialog').showModal();
   } catch(e) { notice(e); }
 }
@@ -397,13 +483,14 @@ function closeFileMenu() { el('file-context').hidden = true; contextEntry = null
 function openFileMenu(entry: Entry, anchor: HTMLElement, x = 0, y = 0) {
   if(busy || saving) return;
   contextEntry = entry; const menu = el('file-context'), bounds = anchor.getBoundingClientRect();
+  el('delete-file').hidden = entry.kind !== 'note' && entry.kind !== 'image';
   menu.hidden = false;
-  menu.style.left = `${Math.max(8,Math.min(x || bounds.left,window.innerWidth - 175))}px`;
-  menu.style.top = `${Math.max(8,Math.min(y || bounds.bottom,window.innerHeight - 52))}px`;
-  el('delete-file').focus();
+  menu.style.left = `${Math.max(8,Math.min(x || bounds.left,window.innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8,Math.min(y || bounds.bottom,window.innerHeight - menu.offsetHeight - 8))}px`;
+  el('show-file').focus();
 }
 function requestDelete() {
-  const entry = contextEntry; closeFileMenu(); if(!entry || busy || saving) return;
+  const entry = contextEntry; closeFileMenu(); if(!entry || entry.kind !== 'note' && entry.kind !== 'image' || busy || saving) return;
   deletingEntry = entry;
   el('delete-title').textContent = `Move file to ${trashName}?`;
   el('delete-description').textContent = `${entry.path}\n\nYou can restore it from the ${trashName}.` + (entry.path === path && dirty() ? '\nUnsaved changes in this note will be discarded.' : '');
@@ -423,7 +510,7 @@ async function deleteSelectedFile() {
       el('preview').replaceChildren(); el('details-content').replaceChildren(); el('preview').hidden = el('editor').hidden = true;
       el('empty').hidden = false; el('empty').querySelector('h1')!.textContent = 'File moved to ' + trashName + '.';
       el('empty').querySelector('p:not(.eyebrow)')!.textContent = 'Choose another note from Files.';
-      el('breadcrumbs').textContent = folder?.name || 'Your field notes';
+      renderBreadcrumbs();
       togglePane('files-pane','files',true); updateStatus();
     }
     renderTree(); el<HTMLDialogElement>('delete-dialog').close(); deletingEntry = null;
@@ -435,6 +522,8 @@ async function deleteSelectedFile() {
 
 el('open-folder').onclick = el('empty-open').onclick = () => { void chooseTarget('folder'); };
 el('open-file').onclick = () => { void chooseTarget('file'); };
+el('workspace-name').onclick = el('tree-heading').onclick = () => { if (folder) showInExplorer(''); };
+el('filename').onclick = () => { if (path) showInExplorer(path); };
 el('files').onclick = () => { togglePane('files-pane','files'); if(!el('files-pane').hidden)el('filter').focus(); };
 el('close-files').onclick = () => { togglePane('files-pane','files',false); el('files').focus(); };
 el('details').onclick = () => togglePane('details-pane','details');
@@ -447,6 +536,7 @@ el<HTMLDialogElement>('search-dialog').oncancel = cancelSearch;
 el('close-image').onclick = () => el<HTMLDialogElement>('image-dialog').close();
 el('dismiss-notice').onclick = clearNotice;
 el('delete-file').onclick = requestDelete;
+el('show-file').onclick = () => { const entry = contextEntry; closeFileMenu(); if (entry) showInExplorer(entry.path); };
 el('confirm-delete').onclick = () => { void deleteSelectedFile(); };
 el('cancel-delete').onclick = () => { deletingEntry = null; el<HTMLDialogElement>('delete-dialog').close(); };
 el<HTMLDialogElement>('delete-dialog').oncancel = () => { deletingEntry = null; };

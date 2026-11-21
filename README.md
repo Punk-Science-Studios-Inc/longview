@@ -50,10 +50,11 @@ Opening a folder shows the Files column and previews the first note without repl
 
 ## First version
 
-- Open a real folder and browse its Markdown files and images.
+- Open a real folder and browse its Markdown files, images, other files, and empty folders.
 - Read rendered Markdown or edit source with CodeMirror, undo, and syntax highlighting.
 - Save with Ctrl/Cmd+S; file changes made outside Longview produce a conflict message rather than an overwrite.
-- Follow relative note links and headings, inspect local images, and open web links in the default browser.
+- Follow relative note links and headings, inspect local images, and open web, email, and telephone links in their default applications. Folder and attachment links open the system file explorer; files are revealed rather than executed. Absolute paths and `file:` links can reveal locations outside the vault without granting Longview access to their contents.
+- Click the vault name, a breadcrumb, the current filename, or the path in Details or the image dialog to open its location in the file explorer. Files and folders also have an explorer arrow and a **Show in file explorer** context-menu action. Links in Details, link-like properties, and recognized paths/URLs in inline code are clickable.
 - Use Ctrl/Cmd+O to open a file, Ctrl/Cmd+Shift+O to choose a folder, and Ctrl/Cmd+K to reveal and focus the Files filter. The filter matches filenames, paths, titles, and tags in the folder tree.
 - Use **Search vault** or Ctrl/Cmd+Shift+F to search note contents across the open folder, independently of file and tag filters. Search matches a literal word or phrase case-insensitively, including frontmatter and unsaved changes in the active note. Results show highlighted excerpts and source line numbers; use the arrow keys and Enter, or click, to open a match in Edit with the text selected. Search shows up to 200 matching lines and reports skipped unreadable notes. It reads current files on each search, so no index needs rebuilding.
 - Save, discard, or cancel before switching documents or closing with unsaved changes.
@@ -80,4 +81,4 @@ cargo test -p longview-core
 cargo check -p longview
 ```
 
-The Rust core has no dependency on Tauri. The frontend has no general filesystem or shell capability. It accesses notes and images through commands scoped to the folder selected in the native picker. Rendered Markdown is sanitized and the desktop CSP blocks executable document content.
+The Rust core has no dependency on Tauri. The frontend has no general filesystem or shell capability. It reads and edits notes and images through commands scoped to the folder selected in the native picker. A separate explorer command can show an explicitly clicked file or folder outside the vault, without reading or executing it. Rendered Markdown is sanitized and the desktop CSP blocks executable document content.

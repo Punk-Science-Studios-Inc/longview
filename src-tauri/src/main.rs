@@ -122,10 +122,26 @@ fn read_image(path: String, state: State<'_, AppState>) -> Result<String, String
 }
 
 #[tauri::command]
+async fn show_in_explorer(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let target = with_workspace(&state, |workspace| workspace.explorer_path(&path))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Open directories themselves; reveal files without launching their associated application.
+        if target.is_dir() {
+            tauri_plugin_opener::open_path(target, None::<&str>)
+        } else {
+            tauri_plugin_opener::reveal_item_in_dir(target)
+        }
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn open_external(url: String, app: tauri::AppHandle) -> Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
-        return Err("Only web and email links can open externally.".into());
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto" | "tel") {
+        return Err("Only web, email, and telephone links can open externally.".into());
     }
     app.opener()
         .open_url(url, None::<&str>)
@@ -140,7 +156,11 @@ fn main() {
             )),
             startup_arguments: Mutex::new(Some(std::env::args_os().skip(1).collect())),
         })
-        .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             open_folder,
             open_file,
@@ -152,6 +172,7 @@ fn main() {
             read_note,
             save_note,
             read_image,
+            show_in_explorer,
             open_external
         ])
         .run(tauri::generate_context!())

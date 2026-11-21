@@ -55,6 +55,8 @@ impl Workspace {
                 "note"
             } else if image_mime(item.path()).is_some() {
                 "image"
+            } else if item.file_type().is_file() {
+                "file"
             } else {
                 continue;
             };
@@ -81,8 +83,7 @@ impl Workspace {
             });
             if entries.len() > 50_000 {
                 return Err(
-                    "This folder contains more than 50,000 supported items. Open a smaller folder."
-                        .into(),
+                    "This folder contains more than 50,000 items. Open a smaller folder.".into(),
                 );
             }
         }
@@ -126,6 +127,17 @@ impl Workspace {
         let path = fs::canonicalize(self.root.join(relative)).map_err(|e| e.to_string())?;
         if !path.starts_with(&self.root) || !path.is_file() {
             return Err("The file must be inside the open folder.".into());
+        }
+        Ok(path)
+    }
+
+    /// Resolve a location for the OS file explorer, without reading or executing it.
+    /// Explicit links may point outside the vault; note/image access remains scoped by resolve().
+    pub fn explorer_path(&self, location: &str) -> Result<PathBuf, String> {
+        let path = fs::canonicalize(self.root.join(location))
+            .map_err(|e| format!("Cannot find this file or folder: {e}"))?;
+        if !path.is_file() && !path.is_dir() {
+            return Err("Choose a regular file or folder to show in the file explorer.".into());
         }
         Ok(path)
     }
@@ -234,6 +246,31 @@ fn image_mime(path: &Path) -> Option<&'static str> {
 mod tests {
     use super::*;
     #[test]
+    fn resolves_explorer_locations_without_expanding_note_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("Vault");
+        fs::create_dir_all(vault.join("Empty folder")).unwrap();
+        fs::write(vault.join("Résumé #1.pdf"), "attachment").unwrap();
+        fs::write(dir.path().join("outside.md"), "private note").unwrap();
+        let workspace = Workspace::open(&vault).unwrap();
+        for location in ["", "Empty folder", "Résumé #1.pdf", "../outside.md"] {
+            assert_eq!(
+                workspace.explorer_path(location).unwrap(),
+                fs::canonicalize(vault.join(location)).unwrap()
+            );
+        }
+        let outside = dir.path().join("outside.md");
+        assert_eq!(
+            workspace.explorer_path(outside.to_str().unwrap()).unwrap(),
+            fs::canonicalize(&outside).unwrap()
+        );
+        assert!(workspace.explorer_path("missing.md").is_err());
+        assert!(workspace.explorer_path("https://example.com").is_err());
+        assert!(workspace.read_note("../outside.md").is_err());
+        assert!(workspace.read_note(outside.to_str().unwrap()).is_err());
+    }
+
+    #[test]
     fn indexes_frontmatter_tags_and_tolerates_malformed_metadata() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
@@ -263,7 +300,11 @@ mod tests {
         fs::write(dir.path().join(".git/private.md"), "hidden").unwrap();
         fs::write(dir.path().join("unrelated.txt"), "other").unwrap();
         let folder = Workspace::open(dir.path()).unwrap().list().unwrap();
-        assert_eq!(folder.entries.len(), 3);
+        assert_eq!(folder.entries.len(), 4);
+        assert!(folder
+            .entries
+            .iter()
+            .any(|e| e.path == "unrelated.txt" && e.kind == "file"));
         assert!(folder
             .entries
             .iter()
