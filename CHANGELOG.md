@@ -5,6 +5,10 @@
 - Make displayed vault/file paths and Details links clickable, with file-explorer actions for every file and folder.
 - Show other file types and empty folders in Files; open folder and attachment links in the system file explorer.
 - Support absolute paths and file URLs, link-like properties, inline references, and linked images while preserving note navigation and scoped file access.
+- Add New file and New folder buttons to the Files pane, creating items in the selected folder (or the open note's folder) and opening new notes automatically.
+- Add Expand all and Collapse all buttons to the Files pane; empty folders are now listed when no filter is active.
+- Render Obsidian-style `![[image]]` and `![[image|width]]` embeds inline in previews, resolved note-relative, vault-relative, or by name anywhere in the folder; missing images show a clear placeholder.
+- Delete now works on folders as well as files from the Files context menu: files move to Trash immediately, folders ask for confirmation first.
 
 ## 0.3.0
 

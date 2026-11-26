@@ -112,30 +112,33 @@ impl Session {
     }
 
     /// Only use the system trash; never fall back to permanent deletion.
-    pub fn delete_file(&self, relative: &str) -> Result<Option<String>, String> {
-        self.delete_file_with(relative, |path| {
+    pub fn delete_entry(&self, relative: &str) -> Result<Option<String>, String> {
+        self.delete_entry_with(relative, |path| {
             trash::delete(path).map_err(|e| e.to_string())
         })
     }
 
-    fn delete_file_with(
+    fn delete_entry_with(
         &self,
         relative: &str,
         remove: impl FnOnce(&Path) -> Result<(), String>,
     ) -> Result<Option<String>, String> {
         let workspace = self.workspace()?;
-        let path = workspace.deletable_path(relative)?;
+        let path = workspace.deletable_entry(relative)?;
         remove(&path)?;
-        // Deleting the remembered note should restore its folder next time, not a missing file.
+        // Deleting the remembered note, or a folder containing it, should restore
+        // its folder next time, not a missing file.
         let repair = || -> Result<(), String> {
-            if self.load_config()?.last_opened == Some(OpenTarget::File(path)) {
-                self.remember(OpenTarget::Folder(workspace.root.clone()))?;
+            if let Some(OpenTarget::File(file)) = self.load_config()?.last_opened {
+                if file == path || file.starts_with(&path) {
+                    self.remember(OpenTarget::Folder(workspace.root.clone()))?;
+                }
             }
             Ok(())
         };
         Ok(repair().err().map(|error| {
             format!(
-                "File moved to Trash, but the last-opened setting could not be updated: {error}"
+                "Item moved to Trash, but the last-opened setting could not be updated: {error}"
             )
         }))
     }
@@ -178,7 +181,7 @@ mod tests {
         let (home, _, note) = sample();
         let mut session = Session::for_home(home.path());
         session.open_path(&note).unwrap();
-        assert!(session.delete_file("Café walk.md").unwrap().is_none());
+        assert!(session.delete_entry("Café walk.md").unwrap().is_none());
         assert!(!note.exists());
         assert!(session.startup(&[]).unwrap().unwrap().file.is_none());
     }
@@ -294,12 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn deleting_last_opened_note_remembers_parent_and_never_deletes_folders_or_outside_files() {
+    fn deleting_last_opened_note_remembers_parent_and_never_deletes_the_root_or_outside_files() {
         let (home, folder, note) = sample();
         let mut session = Session::for_home(home.path());
         session.open_path(&note).unwrap();
         session
-            .delete_file_with("Café walk.md", |path| {
+            .delete_entry_with("Café walk.md", |path| {
                 fs::remove_file(path).map_err(|e| e.to_string())
             })
             .unwrap();
@@ -310,13 +313,45 @@ mod tests {
             fs::canonicalize(folder).unwrap()
         );
         assert!(session
-            .delete_file_with(".", |_| panic!("Must not delete a folder"))
+            .delete_entry_with(".", |_| panic!("Must not delete the open folder itself"))
             .is_err());
         assert!(session
-            .delete_file_with("../outside.md", |_| panic!(
+            .delete_entry_with("../outside.md", |_| panic!(
                 "Must not delete outside the workspace"
             ))
             .is_err());
+    }
+
+    #[test]
+    fn deleting_a_folder_removes_its_contents_and_repairs_a_remembered_note_inside_it() {
+        let (home, folder, note) = sample();
+        fs::create_dir(folder.join("Journal")).unwrap();
+        fs::write(folder.join("Journal/entry.md"), "# Entry").unwrap();
+        let mut session = Session::for_home(home.path());
+        session.open_path(&note).unwrap();
+        session
+            .delete_entry_with("Journal", |path| {
+                fs::remove_dir_all(path).map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert!(!folder.join("Journal").exists());
+        // The remembered note still exists, so the saved target is untouched.
+        assert_eq!(
+            session.startup(&[]).unwrap().unwrap().file.as_deref(),
+            Some("Café walk.md")
+        );
+        // A remembered note inside the deleted folder falls back to the folder.
+        fs::create_dir(folder.join("Journal")).unwrap();
+        fs::write(folder.join("Journal/entry.md"), "# Entry").unwrap();
+        let mut session = Session::for_home(home.path());
+        session.open_path(&folder).unwrap();
+        session.read_note("Journal/entry.md", true).unwrap();
+        session
+            .delete_entry_with("Journal", |path| {
+                fs::remove_dir_all(path).map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert!(session.startup(&[]).unwrap().unwrap().file.is_none());
     }
 
     #[test]
@@ -326,7 +361,7 @@ mod tests {
         session.open_path(&note).unwrap();
         let config = fs::read(&session.config_path).unwrap();
         assert!(session
-            .delete_file_with("Café walk.md", |_| Err("Trash unavailable".into()))
+            .delete_entry_with("Café walk.md", |_| Err("Trash unavailable".into()))
             .is_err());
         assert!(note.exists());
         assert_eq!(fs::read(&session.config_path).unwrap(), config);

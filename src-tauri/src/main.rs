@@ -94,8 +94,18 @@ fn parse_note(text: String) -> longview_core::metadata::ParsedNote {
 }
 
 #[tauri::command]
-async fn delete_file(path: String, state: State<'_, AppState>) -> Result<Option<String>, String> {
-    with_session(&state, |session| session.delete_file(&path))
+async fn delete_entry(path: String, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    with_session(&state, |session| session.delete_entry(&path))
+}
+
+#[tauri::command]
+fn create_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    with_workspace(&state, |w| w.create_folder(&path))
+}
+
+#[tauri::command]
+fn create_file(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    with_workspace(&state, |w| w.create_file(&path))
 }
 
 #[tauri::command]
@@ -168,7 +178,9 @@ fn main() {
             list_files,
             search_notes,
             parse_note,
-            delete_file,
+            delete_entry,
+            create_folder,
+            create_file,
             read_note,
             save_note,
             read_image,

@@ -8,6 +8,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { localTarget, headingId, linkTarget } from './paths';
 import { fileMatches } from './filter';
+import { parseEmbeds, resolveEmbed } from './embeds';
 import './style.css';
 
 interface Entry { path: string; name: string; kind: 'folder' | 'note' | 'image' | 'file'; tags: string[]; title: string | null }
@@ -22,6 +23,8 @@ let folder: Folder | null = null, path = '', original = '', text = '', editMode 
 let folderMode = false;
 let activeTag = '';
 let contextEntry: Entry | null = null, deletingEntry: Entry | null = null;
+let treeSelection: Entry | null = null;
+let newKind: 'file' | 'folder' = 'file';
 const trashName = navigator.platform.startsWith('Win') ? 'Recycle Bin' : 'Trash';
 let busy = false, saving = false, generation = 0, editTimer: ReturnType<typeof setTimeout>;
 let searchVersion = 0, searchRunning = false, searchTimer: ReturnType<typeof setTimeout>;
@@ -95,7 +98,7 @@ function togglePane(id: string, control: string, show = el(id).hidden) {
 async function applyOpened(opened: Opened) {
   cancelSearch(); el<HTMLDialogElement>('search-dialog').close(); el<HTMLInputElement>('search-input').value = '';
   folder = opened.folder; folderMode = opened.file === null;
-  path = ''; text = original = ''; generation++; editorStates.clear(); closedFolders.clear(); clearNotice();
+  path = ''; text = original = ''; generation++; editorStates.clear(); closedFolders.clear(); clearNotice(); treeSelection = null;
   el<HTMLInputElement>('filter').value = '';
   activeTag = ''; document.querySelector('.workspace')!.classList.remove('tag-filtering');
   document.querySelector('.workspace')!.classList.toggle('folder-mode', folderMode);
@@ -216,13 +219,18 @@ function makeFile(entry: Entry) {
   const label = document.createElement('span'); label.textContent = entry.name;
   button.append(icon, label); button.title = entry.path;
   if (entry.path === path) button.setAttribute('aria-current', 'page');
-  button.onclick = () => { if (entry.kind === 'note') navigate(entry.path); else if (entry.kind === 'image') void inspectImage(entry.path, entry.name); else showInExplorer(entry.path); };
-  button.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, button, event.clientX, event.clientY); };
+  button.onclick = () => { setTreeSelection(entry); if (entry.kind === 'note') navigate(entry.path); else if (entry.kind === 'image') void inspectImage(entry.path, entry.name); else showInExplorer(entry.path); };
+  button.oncontextmenu = event => { event.preventDefault(); setTreeSelection(entry); openFileMenu(entry, button, event.clientX, event.clientY); };
   button.onkeydown = event => {
-    if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, button); }
+    if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); setTreeSelection(entry); openFileMenu(entry, button); }
   };
   row.append(button, pathButton(entry.name, entry.path, true));
   return row;
+}
+function setTreeSelection(entry: Entry | null, summary?: HTMLElement) {
+  treeSelection = entry;
+  document.querySelectorAll('#tree summary.selected').forEach(s => s.classList.remove('selected'));
+  if (entry?.kind === 'folder' && summary) summary.classList.add('selected');
 }
 function tagButton(tag: string, label = `#${tag}`) {
   const button = document.createElement('button'); button.className = 'tag'; button.textContent = label;
@@ -259,8 +267,9 @@ function renderTree() {
   if (!q && !activeTag) for (const entry of folder.entries) if (entry.kind === 'folder') needed.add(entry.path);
   for (const entry of leaves) { const parts = entry.path.split('/'); parts.pop(); while(parts.length) { needed.add(parts.join('/')); parts.pop(); } }
   const children = new Map<string, Entry[]>();
+  const filtering = q !== '' || !!activeTag;
   for(const entry of folder.entries) {
-    if(entry.kind === 'folder' ? !needed.has(entry.path) : !visiblePaths.has(entry.path)) continue;
+    if(entry.kind === 'folder' ? filtering && !needed.has(entry.path) : !visiblePaths.has(entry.path)) continue;
     const parent = entry.path.split('/').slice(0,-1).join('/');
     const siblings = children.get(parent) || []; siblings.push(entry); children.set(parent,siblings);
   }
@@ -273,9 +282,11 @@ function renderTree() {
       const summary = document.createElement('summary');
       const label = document.createElement('span'); label.textContent = entry.name;
       summary.append(label, pathButton(entry.name, entry.path, true)); details.append(summary);
-      summary.oncontextmenu = event => { event.preventDefault(); openFileMenu(entry, summary, event.clientX, event.clientY); };
+      if (treeSelection?.path === entry.path) summary.classList.add('selected');
+      summary.onclick = () => setTreeSelection(entry, summary);
+      summary.oncontextmenu = event => { event.preventDefault(); setTreeSelection(entry, summary); openFileMenu(entry, summary, event.clientX, event.clientY); };
       summary.onkeydown = event => {
-        if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openFileMenu(entry, summary); }
+        if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); setTreeSelection(entry, summary); openFileMenu(entry, summary); }
       };
       details.ontoggle = () => { if (details.open) closedFolders.delete(entry.path); else closedFolders.add(entry.path); };
       branch(entry.path, details); container.append(details);
@@ -309,6 +320,7 @@ async function renderNote() {
     const label = code.textContent || '', href = referenceHref(label, activePath);
     if (href !== null) code.replaceChildren(detailLink(label, href, activePath));
   }
+  linkifyEmbeds(preview, activePath);
   if(title && !preview.querySelector('h1')) { const heading = document.createElement('h1'); heading.textContent = title; preview.prepend(heading); }
   const properties = document.createElement('div'); properties.className = 'note-properties';
   for(const key of ['date','status']) {
@@ -333,8 +345,9 @@ async function renderNote() {
   const images = [...preview.querySelectorAll<HTMLImageElement>('img')];
   renderDetails(links, images, parsed.metadata);
   await Promise.all(images.map(async image => {
-    const src = image.getAttribute('src') || '';
-    if (/^https:/i.test(src)) {
+    const embed = image.getAttribute('data-embed');
+    const src = embed ?? image.getAttribute('src') ?? '';
+    if (!embed && /^https:/i.test(src)) {
       image.referrerPolicy = 'no-referrer';
       if (!image.closest('a[href]')) {
         image.tabIndex = 0; image.setAttribute('role', 'link');
@@ -343,9 +356,9 @@ async function renderNote() {
       }
       return;
     }
-    const target = localTarget(activePath, src);
+    const target = embed ? { path: embed, hash: '' } : localTarget(activePath, src);
     image.removeAttribute('src');
-    if (!target) { image.alt = `${image.alt || 'Image'} (unsupported path)`; return; }
+    if (!target) { markImageMissing(image, src, 'unsupported path'); return; }
     try {
       const data = await invoke<string>('read_image', { path: target.path });
       if (path !== activePath || text !== activeText || !image.isConnected) return;
@@ -354,8 +367,42 @@ async function renderNote() {
       image.tabIndex = 0; image.setAttribute('role','button'); image.title = `Inspect ${target.path}`;
       image.onclick = () => { void inspectImage(target.path, image.alt); };
       image.onkeydown = e => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); image.click(); } };
-    } catch { image.alt = `${image.alt || 'Image'} — unavailable: ${target.path}`; }
+    } catch { if (path === activePath && text === activeText && image.isConnected) markImageMissing(image, target.path); }
   }));
+}
+/** Turn Obsidian-style `![[image]]` text left behind by the Markdown parser into img elements. */
+function linkifyEmbeds(container: HTMLElement, notePath: string) {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+        if (parent.tagName === 'PRE' || parent.tagName === 'CODE') return NodeFilter.FILTER_REJECT;
+      }
+      return node.nodeValue?.includes('![[') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  for (const node of nodes) {
+    const parts = parseEmbeds(node.nodeValue || '');
+    if (parts.length === 1 && parts[0].text === node.nodeValue) continue;
+    const fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      if (part.embed) {
+        const image = document.createElement('img');
+        image.alt = part.embed.target;
+        image.setAttribute('data-embed', resolveEmbed(notePath, part.embed.target, folder?.entries || []));
+        if (part.embed.size) image.setAttribute('width', String(part.embed.size));
+        fragment.append(image);
+      } else fragment.append(document.createTextNode(part.text!));
+    }
+    node.replaceWith(fragment);
+  }
+}
+function markImageMissing(image: HTMLImageElement, target: string, reason = 'not found') {
+  image.removeAttribute('src');
+  image.className = 'image-missing';
+  image.alt = `Image ${reason}: ${target}`;
+  image.title = image.alt;
 }
 function renderDetails(links: HTMLAnchorElement[], images: HTMLImageElement[], metadata: NoteMetadata) {
   const box = el('details-content'); box.replaceChildren();
@@ -483,32 +530,45 @@ function closeFileMenu() { el('file-context').hidden = true; contextEntry = null
 function openFileMenu(entry: Entry, anchor: HTMLElement, x = 0, y = 0) {
   if(busy || saving) return;
   contextEntry = entry; const menu = el('file-context'), bounds = anchor.getBoundingClientRect();
-  el('delete-file').hidden = entry.kind !== 'note' && entry.kind !== 'image';
+  el('delete-file').hidden = entry.kind === 'file';
   menu.hidden = false;
   menu.style.left = `${Math.max(8,Math.min(x || bounds.left,window.innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8,Math.min(y || bounds.bottom,window.innerHeight - menu.offsetHeight - 8))}px`;
   el('show-file').focus();
 }
 function requestDelete() {
-  const entry = contextEntry; closeFileMenu(); if(!entry || entry.kind !== 'note' && entry.kind !== 'image' || busy || saving) return;
-  deletingEntry = entry;
-  el('delete-title').textContent = `Move file to ${trashName}?`;
-  el('delete-description').textContent = `${entry.path}\n\nYou can restore it from the ${trashName}.` + (entry.path === path && dirty() ? '\nUnsaved changes in this note will be discarded.' : '');
-  el('confirm-delete').textContent = `Move to ${trashName}`;
-  el<HTMLDialogElement>('delete-dialog').showModal(); el('cancel-delete').focus();
+  const entry = contextEntry; closeFileMenu(); if(!entry || entry.kind === 'file' || busy || saving) return;
+  if (entry.kind === 'folder') {
+    // Folders get a warning; files are moved to Trash immediately.
+    deletingEntry = entry;
+    const inside = folder ? folder.entries.filter(e => e.path.startsWith(entry.path + '/')).length : 0;
+    el('delete-title').textContent = `Move folder to ${trashName}?`;
+    el('delete-description').textContent = `${entry.path}\n\nEverything inside this folder (${inside} ${inside === 1 ? 'item' : 'items'}) will be moved to the ${trashName}. You can restore it from the ${trashName}.`;
+    el('confirm-delete').textContent = `Move to ${trashName}`;
+    el<HTMLDialogElement>('delete-dialog').showModal(); el('cancel-delete').focus();
+  } else if (entry.path === path && dirty()) {
+    afterLeave = async () => { await deleteEntry(entry); };
+    el('unsaved-description').textContent = `${entry.path.split('/').pop()} has unsaved changes.`;
+    el<HTMLDialogElement>('unsaved').showModal();
+  } else {
+    void deleteEntry(entry);
+  }
 }
-async function deleteSelectedFile() {
-  const entry = deletingEntry; if(!entry || busy || saving) return;
+async function deleteEntry(entry: Entry) {
+  if(!entry || busy || saving) return;
   busy = true; el<HTMLButtonElement>('confirm-delete').disabled = true;
   try {
-    const warning = await invoke<string | null>('delete_file', {path: entry.path});
-    generation++; editorStates.delete(entry.path);
-    if(folder) folder.entries = folder.entries.filter(item => item.path !== entry.path);
-    if(entry.path === path) {
+    const warning = await invoke<string | null>('delete_entry', {path: entry.path});
+    generation++;
+    if(folder) folder.entries = folder.entries.filter(item => item.path !== entry.path && !item.path.startsWith(entry.path + '/'));
+    for (const key of [...editorStates.keys()]) if (key === entry.path || key.startsWith(entry.path + '/')) editorStates.delete(key);
+    for (const closed of [...closedFolders]) if (closed === entry.path || closed.startsWith(entry.path + '/')) closedFolders.delete(closed);
+    if (treeSelection && (treeSelection.path === entry.path || treeSelection.path.startsWith(entry.path + '/'))) treeSelection = null;
+    if(entry.path === path || path.startsWith(entry.path + '/')) {
       clearTimeout(editTimer);
       path = ''; text = original = ''; editor.setState(noteState(''));
       el('preview').replaceChildren(); el('details-content').replaceChildren(); el('preview').hidden = el('editor').hidden = true;
-      el('empty').hidden = false; el('empty').querySelector('h1')!.textContent = 'File moved to ' + trashName + '.';
+      el('empty').hidden = false; el('empty').querySelector('h1')!.textContent = `${entry.kind === 'folder' ? 'Folder' : 'File'} moved to ` + trashName + '.';
       el('empty').querySelector('p:not(.eyebrow)')!.textContent = 'Choose another note from Files.';
       renderBreadcrumbs();
       togglePane('files-pane','files',true); updateStatus();
@@ -518,6 +578,55 @@ async function deleteSelectedFile() {
     clearNotice(); if(warning) notice(warning);
   } catch(error) { notice(error); el<HTMLDialogElement>('delete-dialog').close(); }
   finally { busy = false; el<HTMLButtonElement>('confirm-delete').disabled = false; }
+}
+
+function currentTargetFolder(): string {
+  if (treeSelection) return treeSelection.kind === 'folder' ? treeSelection.path : treeSelection.path.split('/').slice(0, -1).join('/');
+  if (path) return path.split('/').slice(0, -1).join('/');
+  return '';
+}
+function openNewDialog(kind: 'file' | 'folder') {
+  if (!native) { notice('Run npm run tauri dev to create items in the desktop app.'); return; }
+  if (!folder) { notice('Open a folder first.'); return; }
+  newKind = kind;
+  const target = currentTargetFolder();
+  el('new-title').textContent = kind === 'file' ? 'New file' : 'New folder';
+  el('new-description').textContent = target ? `Inside “${target.split('/').pop()}” — ${target}` : `At the root of ${folder.name}`;
+  el<HTMLInputElement>('new-name').value = '';
+  el('new-error').textContent = '';
+  el<HTMLDialogElement>('new-dialog').showModal();
+  el<HTMLInputElement>('new-name').focus();
+}
+async function confirmNew() {
+  const raw = el<HTMLInputElement>('new-name').value.trim();
+  const fail = (message: string) => { el('new-error').textContent = message; };
+  if (!raw) { fail('Type a name.'); return; }
+  if (/[/\\]/.test(raw) || raw === '.' || raw === '..' || raw.startsWith('.')) { fail('The name cannot contain slashes or start with a dot.'); return; }
+  let name = raw;
+  if (newKind === 'file') {
+    if (/\.[^./\\]+$/.test(name) && !/\.(md|markdown)$/i.test(name)) { fail('Only Markdown files (.md or .markdown) can be created.'); return; }
+    if (!/\.[^./\\]+$/.test(name)) name += '.md';
+  }
+  const target = currentTargetFolder();
+  const rel = target ? `${target}/${name}` : name;
+  if (busy || saving) return;
+  busy = true;
+  try {
+    await invoke(newKind === 'file' ? 'create_file' : 'create_folder', { path: rel });
+    el<HTMLDialogElement>('new-dialog').close();
+    folder = await invoke<Folder>('list_files');
+    const parts = rel.split('/'); parts.pop();
+    let acc = '';
+    for (const part of parts) { acc = acc ? `${acc}/${part}` : part; closedFolders.delete(acc); }
+    renderTree();
+    el('status').textContent = `Created ${name}`;
+    clearNotice();
+    if (newKind === 'file') {
+      busy = false;
+      await mayLeave(async () => { busy = true; try { await loadNote(rel); } finally { busy = false; } });
+    }
+  } catch (e) { fail(String(e)); }
+  finally { busy = false; }
 }
 
 el('open-folder').onclick = el('empty-open').onclick = () => { void chooseTarget('folder'); };
@@ -537,7 +646,16 @@ el('close-image').onclick = () => el<HTMLDialogElement>('image-dialog').close();
 el('dismiss-notice').onclick = clearNotice;
 el('delete-file').onclick = requestDelete;
 el('show-file').onclick = () => { const entry = contextEntry; closeFileMenu(); if (entry) showInExplorer(entry.path); };
-el('confirm-delete').onclick = () => { void deleteSelectedFile(); };
+el('confirm-delete').onclick = () => { if (deletingEntry) void deleteEntry(deletingEntry); };
+el('new-file').onclick = () => openNewDialog('file');
+el('new-folder').onclick = () => openNewDialog('folder');
+el('expand-all').onclick = () => { closedFolders.clear(); renderTree(); };
+el('collapse-all').onclick = () => { for (const entry of folder?.entries || []) if (entry.kind === 'folder') closedFolders.add(entry.path); renderTree(); };
+el('cancel-new').onclick = () => el<HTMLDialogElement>('new-dialog').close();
+el('confirm-new').onclick = () => { void confirmNew(); };
+el('new-name').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); el('confirm-new').click(); }
+});
 el('cancel-delete').onclick = () => { deletingEntry = null; el<HTMLDialogElement>('delete-dialog').close(); };
 el<HTMLDialogElement>('delete-dialog').oncancel = () => { deletingEntry = null; };
 document.addEventListener('pointerdown', event => { if(!el('file-context').contains(event.target as Node)) closeFileMenu(); });

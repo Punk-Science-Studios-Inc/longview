@@ -142,8 +142,25 @@ impl Workspace {
         Ok(path)
     }
 
-    fn deletable_path(&self, relative: &str) -> Result<PathBuf, String> {
-        let path = self.resolve(relative)?;
+    fn deletable_entry(&self, relative: &str) -> Result<PathBuf, String> {
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
+        {
+            return Err("The item must be inside the open folder.".into());
+        }
+        let path = fs::canonicalize(self.root.join(relative)).map_err(|e| e.to_string())?;
+        if !path.starts_with(&self.root) {
+            return Err("The item must be inside the open folder.".into());
+        }
+        if path == self.root {
+            return Err("The open folder itself cannot be moved to Trash.".into());
+        }
         if fs::symlink_metadata(self.root.join(relative))
             .map_err(|e| e.to_string())?
             .file_type()
@@ -151,10 +168,68 @@ impl Workspace {
         {
             return Err("Symbolic links cannot be deleted from Files.".into());
         }
-        if !is_markdown(&path) && image_mime(&path).is_none() {
+        if path.is_file() && !is_markdown(&path) && image_mime(&path).is_none() {
             return Err("Only Markdown files and supported images can be moved to Trash.".into());
         }
         Ok(path)
+    }
+
+    /// Resolve a not-yet-existing item inside the workspace, validating its name and parent.
+    fn creatable_path(&self, relative: &str) -> Result<PathBuf, String> {
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
+        {
+            return Err("The new item must be inside the open folder.".into());
+        }
+        let mut parent = self.root.clone();
+        let mut name = None;
+        for component in relative_path.components() {
+            match component {
+                Component::Normal(part) => {
+                    if name.is_some() {
+                        parent = parent.join(name.take().unwrap());
+                    }
+                    name = Some(part);
+                }
+                _ => return Err("Choose a name for the new item.".into()),
+            }
+        }
+        let name = name.ok_or("Choose a name for the new item.")?;
+        let name = name.to_str().ok_or("The name must be UTF-8.")?;
+        validate_new_name(name)?;
+        let parent = fs::canonicalize(parent).map_err(|e| e.to_string())?;
+        if !parent.starts_with(&self.root) || !parent.is_dir() {
+            return Err("The new item must be inside the open folder.".into());
+        }
+        let path = parent.join(name);
+        if path.exists() {
+            return Err(format!("“{name}” already exists."));
+        }
+        Ok(path)
+    }
+
+    pub fn create_folder(&self, relative: &str) -> Result<(), String> {
+        let path = self.creatable_path(relative)?;
+        fs::create_dir(&path).map_err(|e| e.to_string())
+    }
+
+    pub fn create_file(&self, relative: &str) -> Result<(), String> {
+        let path = self.creatable_path(relative)?;
+        if !is_markdown(&path) {
+            return Err("New files must be Markdown (.md or .markdown).".into());
+        }
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn read_note(&self, relative: &str) -> Result<String, String> {
@@ -218,6 +293,18 @@ fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         return Err("File grew beyond the size limit while reading.".into());
     }
     Ok(data)
+}
+
+fn validate_new_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.trim() != name || name.starts_with('.') || name.ends_with('.') {
+        return Err("Choose a name without leading or trailing dots or spaces.".into());
+    }
+    if name.chars().any(|c| {
+        c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    }) {
+        return Err("The name cannot contain < > : \" / \\ | ? * or control characters.".into());
+    }
+    Ok(())
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -337,6 +424,48 @@ mod tests {
             .is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "External edit");
     }
+    #[test]
+    fn creates_folders_and_markdown_files_inside_the_workspace_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(dir.path()).unwrap();
+        workspace.create_folder("Journal").unwrap();
+        workspace.create_folder("Journal/2026").unwrap();
+        workspace.create_file("Journal/entry.md").unwrap();
+        workspace.create_file("plain.markdown").unwrap();
+        let listed = workspace.list().unwrap();
+        let paths: Vec<&str> = listed.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"Journal"));
+        assert!(paths.contains(&"Journal/2026"));
+        assert!(paths.contains(&"Journal/entry.md"));
+        assert!(paths.contains(&"plain.markdown"));
+        assert!(workspace.create_folder("Journal").is_err());
+        assert!(workspace.create_file("Journal/entry.md").is_err());
+        assert!(workspace.create_file("notes.txt").is_err());
+        assert!(workspace.create_folder("../escape").is_err());
+        assert!(workspace.create_file("../escape.md").is_err());
+        assert!(workspace.create_folder("bad/name").is_err());
+        assert!(workspace.create_folder(".hidden").is_err());
+        assert!(workspace.create_file("a<b.md").is_err());
+        assert!(workspace.create_folder("missing/child").is_err());
+        assert!(!dir.path().join("escape.md").exists());
+    }
+
+    #[test]
+    fn deletable_entry_allows_folders_but_not_the_root_or_unsupported_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Journal")).unwrap();
+        fs::write(dir.path().join("Journal/entry.md"), "# Entry").unwrap();
+        fs::write(dir.path().join("data.txt"), "text").unwrap();
+        let workspace = Workspace::open(dir.path()).unwrap();
+        assert!(workspace.deletable_entry("Journal").is_ok());
+        assert!(workspace.deletable_entry("Journal/entry.md").is_ok());
+        assert!(workspace.deletable_entry(".").is_err());
+        assert!(workspace.deletable_entry("..").is_err());
+        assert!(workspace.deletable_entry("../outside").is_err());
+        assert!(workspace.deletable_entry("data.txt").is_err());
+        assert!(workspace.deletable_entry("missing").is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlink_escape() {
