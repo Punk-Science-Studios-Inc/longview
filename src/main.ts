@@ -111,7 +111,7 @@ async function applyOpened(opened: Opened) {
   if (next) await loadNote(next, '', false);
   else {
     el('empty').hidden = false; el('empty').querySelector('h1')!.textContent = 'A little room to grow.';
-    el('empty').querySelector('p:not(.eyebrow)')!.textContent = 'This folder has no Markdown files. Add a .md file, then Refresh.';
+    el('empty').querySelector('p')!.textContent = 'This folder has no Markdown files. Add a .md file, then Refresh.';
   }
 }
 async function chooseTarget(kind: 'file' | 'folder') {
@@ -569,7 +569,7 @@ async function deleteEntry(entry: Entry) {
       path = ''; text = original = ''; editor.setState(noteState(''));
       el('preview').replaceChildren(); el('details-content').replaceChildren(); el('preview').hidden = el('editor').hidden = true;
       el('empty').hidden = false; el('empty').querySelector('h1')!.textContent = `${entry.kind === 'folder' ? 'Folder' : 'File'} moved to ` + trashName + '.';
-      el('empty').querySelector('p:not(.eyebrow)')!.textContent = 'Choose another note from Files.';
+      el('empty').querySelector('p')!.textContent = 'Choose another note from Files.';
       renderBreadcrumbs();
       togglePane('files-pane','files',true); updateStatus();
     }

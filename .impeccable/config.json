@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-11-26T18:38:40.615Z",
+        "reason": "Claude triage: #large-image in the image dialog gets its src at runtime from inspectImage(); empty src in the static HTML is intended"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-11-26T18:46:43.319Z",
+        "reason": "Claude triage: detector parses index.html without src/style.css (imported by main.ts via Vite) and reads every role as 16px; real sizes are .page h1 32px, h2 20px, h3 17px, body 14px (h1:h2 = 1.6)"
+      }
+    ]
+  }
+}
